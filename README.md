@@ -1,7 +1,8 @@
 # cmu-embedded
 
 CMU 18-449 Distributed Embedded Systems, Lab 2. Target: **NUCLEO-F401RE**
-(`nucleo_f401re`). The application currently runs Zephyr Blinky.
+(`nucleo_f401re`). The merged Lab2 application receives framed UART commands
+from the Pi and samples two wheel encoders using STM32 timer quadrature mode.
 
 ## Build and flash on this machine
 
@@ -10,7 +11,7 @@ Open a dedicated terminal:
 ```bash
 cd /home/au/Desktop/cmu-embedded
 source .venv/bin/activate
-west build -b nucleo_f401re . -d build/nucleo_f401re
+west build -b nucleo_f401re . -d build/lab2-sang-f401re
 ```
 
 USB permissions were installed on this machine. On a fresh Linux host, install
@@ -25,13 +26,13 @@ Connect or reconnect the board through its ST-LINK Mini-B USB connector with a
 data cable, then flash:
 
 ```bash
-west flash -d build/nucleo_f401re
+west flash -d build/lab2-sang-f401re
 ```
 
-The onboard green LED should toggle every second (a full on/off cycle takes two
-seconds). Lab 2 requires this checkpoint before wiring external hardware. The
-F401RE's LED alias comes from Zephyr; the Nordic overlay in `boards/` does not
-apply to this target.
+This Lab2 application does not blink the onboard LED. Its serial output reports
+the UART link state, decoded command values, and encoder counts/speeds. The
+course's initial Blinky checkpoint should be built separately from the Zephyr
+sample before attaching external hardware.
 
 The course's *Flashing and Debugging Your Nucleo* guide lists
 **STM32CubeProgrammer as required** and notes that OpenOCD is included with
@@ -41,7 +42,7 @@ in `PATH`. Verify it with `STM32_Programmer_CLI --version`. The F401RE default
 runner is set in `CMakeLists.txt`. To name it explicitly for one flash:
 
 ```bash
-west flash -d build/nucleo_f401re -r stm32cubeprogrammer
+west flash -d build/lab2-sang-f401re -r stm32cubeprogrammer
 ```
 
 The guide's `source .venv/bin/active` line contains a typo. Use
@@ -49,7 +50,7 @@ The guide's `source .venv/bin/active` line contains a typo. Use
 `zephyr-env.sh` command is unnecessary. Do not replace the board's ST-LINK
 firmware with J-Link firmware; the course guide explicitly prohibits that.
 
-Subsequent builds can use `west build -d build/nucleo_f401re`. Activate the
+Subsequent builds can use `west build -d build/lab2-sang-f401re`. Activate the
 environment in each new terminal. Run `deactivate` when finished; this local
 activation restores the previous shell settings.
 
@@ -65,7 +66,7 @@ Everything installed specifically for this project is inside this directory:
 | `.tools/zephyr-sdk-1.0.1/` | ARM compiler and host tools, including OpenOCD |
 | `.tools/STM32CubeProgrammer/` | ST's programmer and CLI (version 2.23.0) |
 | `.tools/cache/` | Project build caches |
-| `build/nucleo_f401re/` | Firmware and generated build files |
+| `build/lab2-sang-f401re/` | Lab2 firmware and generated build files |
 
 These local directories are ignored by Git. The tracked `zephyr-env.sh` records
 the project paths; this machine's `.venv/bin/activate` sources it.
@@ -103,8 +104,9 @@ because `zephyr-env.sh` sets `ZEPHYR_BASE` explicitly.
 
 ## Verification and remaining hardware step
 
-Verified on this machine: complete F401RE firmware build, `python -m pip check`,
-and SDK OpenOCD startup. Firmware: `build/nucleo_f401re/zephyr/zephyr.elf`.
+Verified on this machine: complete Lab2 F401RE firmware build,
+`python -m pip check`, and SDK OpenOCD startup. Firmware:
+`build/lab2-sang-f401re/zephyr/zephyr.elf`.
 
 USB rules are installed, and the Nucleo's ST-LINK/V2.1 was detected. The
 STM32CubeProgrammer CLI version command passed. This build now selects
