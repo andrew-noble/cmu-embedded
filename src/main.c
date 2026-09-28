@@ -11,32 +11,30 @@
 #define CMD_ID_HI       0x01    /* ID 0x100 */
 #define CMD_ID_LO       0x00
 #define CMD_DLC         8
-
 #define LINK_TIMEOUT_MS 150     /* time since last VALID frame */
 #define PRINT_EVERY     10      /* print 1 of every N valid frames */
 
-/* Raw bytes from the ISR to the parser. A full queue drops new bytes. */
-K_MSGQ_DEFINE(rx_q, sizeof(uint8_t), 64, 1);
 
-static const struct device *const uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
+K_MSGQ_DEFINE(rx_q, sizeof(uint8_t), 64, 1);  /* Raw bytes from the ISR to the parser. A full queue drops new bytes. */
+static const struct device *const uart_device = DEVICE_DT_GET(UART_DEVICE_NODE); /* Pointer to Zephyr's USART1 device object. */
 
-/* ISR: move bytes from the hardware FIFO into the queue. Nothing else. */
-static void serial_cb(const struct device *dev, void *user_data)
+
+static void serial_cb(const struct device *device, void *user_data) /* ISR: move bytes from the hardware FIFO into the queue. Nothing else. */
 {
-	uint8_t c;
-
 	ARG_UNUSED(user_data);
-	uart_irq_update(dev);
-	if (uart_irq_rx_ready(dev) <= 0) {
+
+	uint8_t c;
+	uart_irq_update(device);
+	if (uart_irq_rx_ready(device) <= 0) {
 		return;
 	}
-	while (uart_fifo_read(dev, &c, 1) == 1) {
+	while (uart_fifo_read(device, &c, 1) == 1) {
 		k_msgq_put(&rx_q, &c, K_NO_WAIT);
 	}
 }
 
-/* CRC-8, poly 0x07, init 0x00. Identical to the Pi's version. */
-static uint8_t crc8(const uint8_t *buf, size_t len)
+
+static uint8_t crc8(const uint8_t *buf, size_t len) /* CRC-8 checksum, poly 0x07, init 0x00. Identical to the Pi's version. */
 {
 	uint8_t crc = 0x00;
 
@@ -54,9 +52,8 @@ static uint8_t crc8(const uint8_t *buf, size_t len)
 static uint8_t frame[FRAME_LEN];
 static int idx;
 
-/* Feed one byte. Returns 1 for a complete valid frame (in frame[]),
- * -1 for a rejected frame, 0 if more bytes are needed. */
-static int parse_byte(uint8_t c)
+
+static int parse_byte(uint8_t c) /* Feed one byte. Returns 1 for a complete valid frame (in frame[]), * -1 for a rejected frame, 0 if more bytes are needed. */
 {
 	if (idx == 0) {
 		if (c == UART_SOF) {
@@ -67,9 +64,7 @@ static int parse_byte(uint8_t c)
 
 	frame[idx++] = c;
 
-	/* Check the header early so a false start byte costs little.
-	 * If the bad byte is itself a start byte, begin a new frame with it. */
-	if ((idx == 2 && c != CMD_ID_HI) ||
+	if ((idx == 2 && c != CMD_ID_HI) ||  /* Check the header early so a false start byte costs little. * If the bad byte is itself a start byte, begin a new frame with it. */
 	    (idx == 3 && c != CMD_ID_LO) ||
 	    (idx == 4 && c != CMD_DLC)) {
 		idx = 0;
@@ -90,7 +85,6 @@ static int parse_byte(uint8_t c)
 
 /* ------------------------------------------------------------------------
  * Encoders
- *
  * Each encoder is counted in hardware by a timer in quadrature (x4) mode.
  * A thread samples both counters every ENC_PERIOD_MS and turns the change
  * in count into a velocity.
@@ -111,7 +105,7 @@ static int parse_byte(uint8_t c)
 
 struct encoder {
 	const char *name;
-	const struct device *dev;
+	const struct device *device;
 	int32_t cpr;        /* counts per wheel revolution (from devicetree) */
 	int32_t modulus;    /* counter wraps back to 0 at this value */
 	int32_t last_raw;   /* counter value at the previous sample */
@@ -121,35 +115,35 @@ struct encoder {
 
 static struct encoder enc_left = {
 	.name = "L",
-	.dev = DEVICE_DT_GET(QDEC_LEFT_NODE),
+	.device = DEVICE_DT_GET(QDEC_LEFT_NODE),
 	.cpr = DT_PROP(QDEC_LEFT_NODE, st_counts_per_revolution),
 	.modulus = ENC_MODULUS(DT_PROP(QDEC_LEFT_NODE, st_counts_per_revolution)),
 };
 
 static struct encoder enc_right = {
 	.name = "R",
-	.dev = DEVICE_DT_GET(QDEC_RIGHT_NODE),
+	.device = DEVICE_DT_GET(QDEC_RIGHT_NODE),
 	.cpr = DT_PROP(QDEC_RIGHT_NODE, st_counts_per_revolution),
 	.modulus = ENC_MODULUS(DT_PROP(QDEC_RIGHT_NODE, st_counts_per_revolution)),
 };
 
-/* Read the raw hardware counter through the sensor API. */
-static int encoder_read_raw(const struct encoder *e, int32_t *raw)
+
+static int encoder_read_raw(const struct encoder *e, int32_t *raw) /* Read the raw hardware counter through the sensor API. */
 {
 	struct sensor_value v;
-	int rc = sensor_sample_fetch_chan(e->dev, SENSOR_CHAN_ENCODER_COUNT);
+	int rc = sensor_sample_fetch_chan(e->device, SENSOR_CHAN_ENCODER_COUNT);
 
 	if (rc == 0) {
-		rc = sensor_channel_get(e->dev, SENSOR_CHAN_ENCODER_COUNT, &v);
+		rc = sensor_channel_get(e->device, SENSOR_CHAN_ENCODER_COUNT, &v); /*replace rc*/
 	}
-	if (rc == 0) {
+	if (rc == 0) { 	/*check rc again*/
 		*raw = v.val1;
 	}
 	return rc;
 }
 
-/* Sample one encoder: change since last sample, with wraparound undone. */
-static void encoder_update(struct encoder *e)
+
+static void encoder_update(struct encoder *e) /* Sample one encoder: change since last sample, with wraparound undone. */
 {
 	int32_t raw;
 
@@ -171,13 +165,16 @@ static void encoder_update(struct encoder *e)
 	e->position += d;
 }
 
-/* Wheel speed in rpm over a window of `counts` taken in `window_ms`. */
-static int32_t counts_to_rpm(int32_t counts, int32_t cpr, int32_t window_ms)
+
+static int32_t counts_to_rpm(int32_t counts, int32_t cpr, int32_t window_ms) /* Wheel speed in rpm over a window of `counts` taken in `window_ms`. */
 {
 	return (int32_t)((int64_t)counts * 60000 / ((int64_t)cpr * window_ms));
 }
 
+
+/*------------------------------------------------------------ THREAD ---------------------------------------------------------------*/
 K_TIMER_DEFINE(enc_timer, NULL, NULL);
+
 
 static void encoder_thread(void *p1, void *p2, void *p3)
 {
@@ -190,7 +187,7 @@ static void encoder_thread(void *p1, void *p2, void *p3)
 	uint32_t n = 0;
 
 	for (int i = 0; i < 2; i++) {
-		if (!device_is_ready(encs[i]->dev) ||
+		if (!device_is_ready(encs[i]->device) ||
 		    encoder_read_raw(encs[i], &encs[i]->last_raw) != 0) {
 			printk("Encoder %s not ready, check overlay\n", encs[i]->name);
 			return;
@@ -230,7 +227,9 @@ static void encoder_thread(void *p1, void *p2, void *p3)
 }
 
 K_THREAD_DEFINE(enc_tid, ENC_STACK_SIZE, encoder_thread, NULL, NULL, NULL,
-		ENC_PRIORITY, 0, 0);
+			ENC_PRIORITY, 0, 0);
+/*------------------------------------------------------------ THREAD ---------------------------------------------------------------*/
+
 
 int main(void)
 {
@@ -238,20 +237,20 @@ int main(void)
 	int64_t last_valid_ms = 0;
 	uint32_t n_valid = 0, n_bad = 0;
 
-	if (!device_is_ready(uart_dev)) {
+	if (!device_is_ready(uart_device)) {
 		printk("USART1 not ready, check overlay\n");
 		return 0;
 	}
 
-	int ret = uart_irq_callback_user_data_set(uart_dev, serial_cb, NULL);
+	int ret = uart_irq_callback_user_data_set(uart_device, serial_cb, NULL);
+
 	if (ret < 0) {
 		printk("Error setting UART callback: %d\n", ret);
 		return 0;
 	}
-	uart_irq_rx_enable(uart_dev);
 
-	printk("CRC self-test: 0x%02x (expect 0xf4)\n",
-	       crc8((const uint8_t *)"123456789", 9));
+	uart_irq_rx_enable(uart_device);
+	printk("CRC self-test: 0x%02x (expect 0xf4)\n", crc8((const uint8_t *)"123456789", 9));
 	printk("Waiting for commands (link DOWN)\n");
 
 	while (1) {
