@@ -1,19 +1,21 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
-#include <zephyr/drivers/sensor.h>
 
+#include "motor.h"
+#include "motor_config.h"
+
+/* Pi link: interrupt receives bytes; main parses complete commands. */
 #define UART_DEVICE_NODE DT_NODELABEL(usart1)
 
-/* Frame format: must match bridge.c on the Pi */
+/* Provisional frame format; verify against the Pi sender. */
 #define UART_SOF        0xA5
 #define FRAME_LEN       13      /* SOF + ID(2) + DLC + data(8) + CRC */
 #define CMD_ID_HI       0x01    /* ID 0x100 */
 #define CMD_ID_LO       0x00
 #define CMD_DLC         8
-#define LINK_TIMEOUT_MS 150     /* time since last VALID frame */
+#define LINK_TIMEOUT_MS 95      /* checked every 5 ms; meet 100 ms checkoff */
 #define PRINT_EVERY     10      /* print 1 of every N valid frames */
-
 
 K_MSGQ_DEFINE(rx_q, sizeof(uint8_t), 64, 1);  /* Raw bytes from the ISR to the parser. A full queue drops new bytes. */
 static const struct device *const uart_device = DEVICE_DT_GET(UART_DEVICE_NODE); /* Pointer to Zephyr's USART1 device object. */
@@ -34,7 +36,7 @@ static void serial_cb(const struct device *device, void *user_data) /* ISR: move
 }
 
 
-static uint8_t crc8(const uint8_t *buf, size_t len) /* CRC-8 checksum, poly 0x07, init 0x00. Identical to the Pi's version. */
+static uint8_t crc8(const uint8_t *buf, size_t len) /* CRC-8, poly 0x07, init 0x00. */
 {
 	uint8_t crc = 0x00;
 
@@ -83,158 +85,11 @@ static int parse_byte(uint8_t c) /* Feed one byte. Returns 1 for a complete vali
 }
 
 
-/* ------------------------------------------------------------------------
- * Encoders
- * Each encoder is counted in hardware by a timer in quadrature (x4) mode.
- * A thread samples both counters every ENC_PERIOD_MS and turns the change
- * in count into a velocity.
- * ---------------------------------------------------------------------- */
-
-#define ENC_PERIOD_MS    10      /* sampling period */
-#define ENC_PRINT_EVERY  10      /* print every N samples (100 ms) */
-#define ENC_STACK_SIZE   1024
-#define ENC_PRIORITY     2       /* revisit when building the task table */
-
-#define QDEC_LEFT_NODE   DT_NODELABEL(qdec_left)
-#define QDEC_RIGHT_NODE  DT_NODELABEL(qdec_right)
-
-/* The STM32 qdec driver makes the 16-bit counter wrap at the largest
- * multiple of counts-per-revolution that fits: 65535 - (65535 % cpr).
- * We need the same number to undo the wrap. */
-#define ENC_MODULUS(cpr) (65535 - (65535 % (cpr)))
-
-struct encoder {
-	const char *name;
-	const struct device *device;
-	int32_t cpr;        /* counts per wheel revolution (from devicetree) */
-	int32_t modulus;    /* counter wraps back to 0 at this value */
-	int32_t last_raw;   /* counter value at the previous sample */
-	int32_t position;   /* accumulated counts since boot */
-	int32_t delta;      /* counts during the most recent period */
-};
-
-static struct encoder enc_left = {
-	.name = "L",
-	.device = DEVICE_DT_GET(QDEC_LEFT_NODE),
-	.cpr = DT_PROP(QDEC_LEFT_NODE, st_counts_per_revolution),
-	.modulus = ENC_MODULUS(DT_PROP(QDEC_LEFT_NODE, st_counts_per_revolution)),
-};
-
-static struct encoder enc_right = {
-	.name = "R",
-	.device = DEVICE_DT_GET(QDEC_RIGHT_NODE),
-	.cpr = DT_PROP(QDEC_RIGHT_NODE, st_counts_per_revolution),
-	.modulus = ENC_MODULUS(DT_PROP(QDEC_RIGHT_NODE, st_counts_per_revolution)),
-};
-
-
-static int encoder_read_raw(const struct encoder *e, int32_t *raw) /* Read the raw hardware counter through the sensor API. */
-{
-	struct sensor_value v;
-	int rc = sensor_sample_fetch_chan(e->device, SENSOR_CHAN_ENCODER_COUNT);
-
-	if (rc == 0) {
-		rc = sensor_channel_get(e->device, SENSOR_CHAN_ENCODER_COUNT, &v); /*replace rc*/
-	}
-	if (rc == 0) { 	/*check rc again*/
-		*raw = v.val1;
-	}
-	return rc;
-}
-
-
-static void encoder_update(struct encoder *e) /* Sample one encoder: change since last sample, with wraparound undone. */
-{
-	int32_t raw;
-
-	if (encoder_read_raw(e, &raw) != 0) {
-		return;
-	}
-
-	int32_t d = raw - e->last_raw;
-
-	/* A jump of more than half the counter range means it wrapped. */
-	if (d > e->modulus / 2) {
-		d -= e->modulus;
-	} else if (d < -(e->modulus / 2)) {
-		d += e->modulus;
-	}
-
-	e->last_raw = raw;
-	e->delta = d;
-	e->position += d;
-}
-
-
-static int32_t counts_to_rpm(int32_t counts, int32_t cpr, int32_t window_ms) /* Wheel speed in rpm over a window of `counts` taken in `window_ms`. */
-{
-	return (int32_t)((int64_t)counts * 60000 / ((int64_t)cpr * window_ms));
-}
-
-
-/*------------------------------------------------------------ THREAD ---------------------------------------------------------------*/
-K_TIMER_DEFINE(enc_timer, NULL, NULL);
-
-
-static void encoder_thread(void *p1, void *p2, void *p3)
-{
-	ARG_UNUSED(p1);
-	ARG_UNUSED(p2);
-	ARG_UNUSED(p3);
-
-	struct encoder *encs[] = { &enc_left, &enc_right };
-	int32_t window_start[2];
-	uint32_t n = 0;
-
-	for (int i = 0; i < 2; i++) {
-		if (!device_is_ready(encs[i]->device) ||
-		    encoder_read_raw(encs[i], &encs[i]->last_raw) != 0) {
-			printk("Encoder %s not ready, check overlay\n", encs[i]->name);
-			return;
-		}
-		window_start[i] = 0;
-	}
-
-	printk("Encoders ready (cpr L=%d R=%d, period %d ms)\n",
-	       (int)enc_left.cpr, (int)enc_right.cpr, ENC_PERIOD_MS);
-
-	/* A periodic kernel timer gives a fixed period that does not drift,
-	 * unlike k_sleep() after each iteration. */
-	k_timer_start(&enc_timer, K_MSEC(ENC_PERIOD_MS), K_MSEC(ENC_PERIOD_MS));
-
-	while (1) {
-		k_timer_status_sync(&enc_timer);   /* wait for the next tick */
-
-		encoder_update(&enc_left);
-		encoder_update(&enc_right);
-
-		if (++n % ENC_PRINT_EVERY == 0) {
-			int32_t window_ms = ENC_PERIOD_MS * ENC_PRINT_EVERY;
-			int32_t rpm[2];
-
-			for (int i = 0; i < 2; i++) {
-				int32_t moved = encs[i]->position - window_start[i];
-
-				rpm[i] = counts_to_rpm(moved, encs[i]->cpr, window_ms);
-				window_start[i] = encs[i]->position;
-			}
-
-			printk("ENC  L pos %8d  rpm %5d  |  R pos %8d  rpm %5d\n",
-			       (int)enc_left.position, (int)rpm[0],
-			       (int)enc_right.position, (int)rpm[1]);
-		}
-	}
-}
-
-K_THREAD_DEFINE(enc_tid, ENC_STACK_SIZE, encoder_thread, NULL, NULL, NULL,
-			ENC_PRIORITY, 0, 0);
-/*------------------------------------------------------------ THREAD ---------------------------------------------------------------*/
-
-
 int main(void)
 {
 	bool link_ok = false;           /* power up in the "link down" state */
 	int64_t last_valid_ms = 0;
+	int64_t last_print_ms = 0;
 	uint32_t n_valid = 0, n_bad = 0;
 
 	if (!device_is_ready(uart_device)) {
@@ -262,8 +117,29 @@ int main(void)
 			int r = parse_byte(c);
 
 			if (r > 0) {
+				int16_t steer = (int16_t)(uint16_t)(frame[4] | (frame[5] << 8));
+				struct motor_command command = {
+					.throttle = (uint16_t)(frame[6] | (frame[7] << 8)),
+					.brake = (uint16_t)(frame[8] | (frame[9] << 8)),
+					.clutch = frame[10],
+					.valid = true,
+				};
+
+				if (command.throttle < THROTTLE_RAW_MIN ||
+				    command.throttle > THROTTLE_RAW_MAX ||
+				    command.brake < BRAKE_RAW_MIN ||
+				    command.brake > BRAKE_RAW_MAX ||
+				    command.clutch < CLUTCH_RAW_MIN ||
+				    command.clutch > CLUTCH_RAW_MAX) {
+					n_bad++;
+					motor_submit((struct motor_command) { 0 });
+					link_ok = false;
+					continue;
+				}
+
 				last_valid_ms = k_uptime_get();
 				n_valid++;
+				motor_submit(command);
 
 				if (!link_ok) {
 					link_ok = true;
@@ -271,12 +147,9 @@ int main(void)
 				}
 
 				if (n_valid % PRINT_EVERY == 0) {
-					int16_t  steer = (int16_t)(uint16_t)(frame[4] | (frame[5] << 8));
-					uint16_t thr   = (uint16_t)(frame[6] | (frame[7] << 8));
-					uint16_t brk   = (uint16_t)(frame[8] | (frame[9] << 8));
-
-					printk("steer %6d  thr %5u  brk %5u  seq %3u  bad %u\n",
-					       steer, (unsigned)thr, (unsigned)brk,
+					printk("steer %6d  thr %5u  brk %5u  clutch %3u  seq %3u  bad %u\n",
+					       steer, (unsigned)command.throttle,
+					       (unsigned)command.brake, (unsigned)command.clutch,
 					       (unsigned)frame[11], (unsigned)n_bad);
 				}
 			} else if (r < 0) {
@@ -289,9 +162,21 @@ int main(void)
 
 			if (elapsed > LINK_TIMEOUT_MS) {
 				link_ok = false;
+				motor_submit((struct motor_command) { 0 });
 				printk("LINK LOST (%d ms since last valid frame)\n",
 				       (int)elapsed);
 			}
+		}
+
+		if (k_uptime_get() - last_print_ms >= 100) {
+			struct motor_telemetry telemetry;
+			motor_get_telemetry(&telemetry);
+			last_print_ms = k_uptime_get();
+			printk("ENC L %8d %5d rpm | R %8d %5d rpm | target %3d duty %4d %s\n",
+			       (int)telemetry.left_position, (int)telemetry.left_rpm,
+			       (int)telemetry.right_position, (int)telemetry.right_rpm,
+			       (int)telemetry.target_rpm, (int)telemetry.duty_permille,
+			       telemetry.reverse ? "REV" : "FWD");
 		}
 	}
 	return 0;

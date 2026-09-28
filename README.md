@@ -34,6 +34,45 @@ the UART link state, decoded command values, and encoder counts/speeds. The
 course's initial Blinky checkpoint should be built separately from the Zephyr
 sample before attaching external hardware.
 
+## Provisional motor control
+
+Code map: [`src/main.c`](src/main.c) receives and checks UART commands;
+[`src/encoder.c`](src/encoder.c) samples the two hardware encoder counters;
+[`src/motor.c`](src/motor.c) runs PWM, braking, clutch direction changes, and
+PID. Their small `.h` files expose only the data and functions shared between
+modules. Change pedal ranges and tuning in [`src/motor_config.h`](src/motor_config.h).
+
+The motor code uses D3/D6 for L298N enable PWM and D2/D4/D12/D11 for direction
+inputs. The two encoder counters still run in hardware. One control thread wakes
+for a valid UART command or a 10 ms encoder sample. Brake takes priority and
+puts both L298N channels in dynamic braking (equal inputs, enable held high).
+Throttle selects a target RPM; a PID loop uses the average of the two wheel
+speeds. Clutch is treated as an analog pedal: a new press past its threshold
+toggles forward/reverse only when throttle is zero and both wheels are stopped.
+
+The existing 13-byte UART frame is provisionally interpreted as: start `A5`,
+ID `01 00`, DLC `08`, steering signed 16-bit little-endian, throttle unsigned
+16-bit little-endian, brake unsigned 16-bit little-endian, clutch unsigned
+8-bit, sequence unsigned 8-bit, CRC-8. Steering is decoded but steering servo
+control is not implemented yet. **No Pi `bridge.c` exists in this repository or
+its available branches**, so the sender must be checked against this layout.
+An 8-bit clutch requires the Pi to scale its original pedal reading to 0–255.
+
+Edit [the motor settings](src/motor_config.h) after checking actual pedal
+ranges, rest/pressed directions, motor polarity, counts per wheel revolution,
+and safe maximum RPM. The present 0–1000 throttle/brake ranges and PID gains
+are initial placeholders. Set `THROTTLE_RAW_REST` and `THROTTLE_RAW_FULL` to
+the actual readings; the code handles either direction. Brake and clutch each
+have a threshold and `PRESSED_HIGH` switch. `MOTOR_OUTPUTS_ENABLED` starts at
+`0`: firmware can
+read commands and compute a duty value but holds both motors in dynamic braking.
+Only set it to `1` after verifying the Pi packet and motor wiring with wheels
+lifted. The encoder counts-per-revolution setting is in
+`boards/nucleo_f401re.overlay`; PWM pin mapping and 1 kHz period are there too.
+No physical motor response or 2 ms timing measurement has been performed.
+The link watchdog uses 95 ms plus a 5 ms receive wait to target the PDF's
+stricter 100 ms unplug checkoff; an earlier PDF paragraph says 150 ms.
+
 The course's *Flashing and Debugging Your Nucleo* guide lists
 **STM32CubeProgrammer as required** and notes that OpenOCD is included with
 the Zephyr SDK on Linux. STM32CubeProgrammer **2.23.0 is installed** at

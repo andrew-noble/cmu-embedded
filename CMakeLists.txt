@@ -8,6 +8,6 @@ if(BOARD MATCHES "^nucleo_f401re($|/)")
 endif()
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(blinky)
+project(lab2_sensors_actuators)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE src/main.c src/encoder.c src/motor.c)
