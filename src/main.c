@@ -3,7 +3,6 @@
 #include <zephyr/drivers/uart.h>
 
 #include "motor.h"
-#include "motor_config.h"
 
 /* Pi link: interrupt receives bytes; main parses complete commands. */
 #define UART_DEVICE_NODE DT_NODELABEL(usart1)
@@ -125,21 +124,14 @@ int main(void)
 					.valid = true,
 				};
 
-				if (command.throttle < THROTTLE_RAW_MIN ||
-				    command.throttle > THROTTLE_RAW_MAX ||
-				    command.brake < BRAKE_RAW_MIN ||
-				    command.brake > BRAKE_RAW_MAX ||
-				    command.clutch < CLUTCH_RAW_MIN ||
-				    command.clutch > CLUTCH_RAW_MAX) {
+				if (!motor_submit(command)) {
 					n_bad++;
-					motor_submit((struct motor_command) { 0 });
 					link_ok = false;
 					continue;
 				}
 
 				last_valid_ms = k_uptime_get();
 				n_valid++;
-				motor_submit(command);
 
 				if (!link_ok) {
 					link_ok = true;

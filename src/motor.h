@@ -21,7 +21,9 @@ struct motor_telemetry {
 	bool reverse;
 };
 
-void motor_submit(struct motor_command command);
+/* Accept a command only when all pedal values are in range.
+ * Returns false and requests braking for invalid or link-down commands. */
+bool motor_submit(struct motor_command command);
 void motor_get_telemetry(struct motor_telemetry *telemetry);
 
 #endif

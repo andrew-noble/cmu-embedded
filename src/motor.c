@@ -25,14 +25,27 @@ static bool drive_active;
 static bool drive_reverse;
 K_SEM_DEFINE(motor_wake, 0, 1);
 
-void motor_submit(struct motor_command command)
+bool motor_submit(struct motor_command command)
 {
+	bool accepted = command.valid &&
+		command.throttle >= THROTTLE_RAW_MIN &&
+		command.throttle <= THROTTLE_RAW_MAX &&
+		command.brake >= BRAKE_RAW_MIN &&
+		command.brake <= BRAKE_RAW_MAX &&
+		command.clutch >= CLUTCH_RAW_MIN &&
+		command.clutch <= CLUTCH_RAW_MAX;
+
+	if (!accepted) {
+		command = (struct motor_command) { 0 };
+	}
+
 	k_spinlock_key_t key = k_spin_lock(&motor_lock);
 
 	latest_command = command;
 	command_generation++;
 	k_spin_unlock(&motor_lock, key);
 	k_sem_give(&motor_wake);
+	return accepted;
 }
 
 
