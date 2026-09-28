@@ -1,0 +1,56 @@
+/*
+ * Nucleo-F401RE overlay
+ *
+ * USART1 (Pi link) stays on the board default pins: PB6 = TX, PB7 = RX.
+ * Encoders use two timers in quadrature-decoder mode:
+ *   Left  encoder: TIM3, CH1 = PB4 (D5), CH2 = PB5 (D4)
+ *   Right encoder: TIM1, CH1 = PA8 (D7), CH2 = PA9 (D8)
+ */
+
+/* Keep the Pi link's RX line idle-high when the cable is unplugged. */
+&usart1_rx_pb7 {
+	bias-pull-up;
+};
+
+/* Pull-ups on the encoder inputs, in case the encoder outputs are open-drain. */
+&tim3_ch1_pb4 {
+	bias-pull-up;
+};
+
+&tim3_ch2_pb5 {
+	bias-pull-up;
+};
+
+&tim1_ch1_pa8 {
+	bias-pull-up;
+};
+
+&tim1_ch2_pa9 {
+	bias-pull-up;
+};
+
+&timers3 {
+	status = "okay";
+
+	qdec_left: qdec {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch1_pb4 &tim3_ch2_pc7>;
+		pinctrl-names = "default";
+		st,encoder-mode = <0x3>;           /* x4: count every edge of A and B */
+		st,input-filter-level = <10>;      /* reject glitches shorter than ~1 us */
+		st,counts-per-revolution = <3960>; /* per WHEEL revolution; measure and update */
+	};
+};
+
+&timers1 {
+	status = "okay";
+
+	qdec_right: qdec {
+		status = "okay";
+		pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+		pinctrl-names = "default";
+		st,encoder-mode = <0x3>;
+		st,input-filter-level = <10>;
+		st,counts-per-revolution = <3960>;
+	};
+};
