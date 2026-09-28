@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.28.0)
+
+# Keep the course's programmer choice in source control for clean F401RE builds.
+if(BOARD MATCHES "^nucleo_f401re($|/)")
+  set(BOARD_FLASH_RUNNER stm32cubeprogrammer CACHE STRING "F401RE flash runner")
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(blinky)
 
