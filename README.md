@@ -74,8 +74,12 @@ Byte 10 is ignored for clutch until the Pi sender is extended.
 Edit [the motor settings](src/config.h) after checking actual pedal
 ranges, rest/pressed directions, motor polarity, counts per wheel revolution,
 and safe maximum RPM. The throttle endpoints now match the Pi source's stated
-0–32767 range; the brake threshold (16384), max RPM, and PID gains are starting
-points to verify. `CLUTCH_CONTROL_ENABLED` remains `0` for forward-only mode.
+0–32767 range. The measured brake range is 30454 released to 32767 fully
+pressed, with braking active at 31610 or above. Brake input validation accepts
+0–32767 because the released reading can fall below 30454; that measured rest
+value is not a rejection boundary. Check the chosen midpoint threshold during
+pedal testing; max RPM and PID gains
+remain starting points to verify. `CLUTCH_CONTROL_ENABLED` remains `0` for forward-only mode.
 `MOTOR_OUTPUTS_ENABLED` is `1`, and PWM duty may reach 100%; this is a software
 output range, not a current limit. A valid throttle command above the 1% deadband can drive the
 motors when brake is below its provisional threshold. Confirm pedal values and

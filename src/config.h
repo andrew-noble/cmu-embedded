@@ -62,9 +62,9 @@
 #define STATUS_TX_ENABLED       1
 #define STATUS_PRINT_EVERY      50
 
-/* Current Pi bridge.c documents pedal values as 0..32767 and sends their
- * 16-bit patterns little-endian. Negative readings are rejected until live
- * Pi output resolves the conflict with the reported -32767 release value.
+/* Pi pedal fields are 16-bit little-endian values. Throttle uses 0..32767;
+ * measured brake endpoints are 30454 released and 32767 fully pressed.
+ * Negative readings are rejected.
  * Byte 10 is a buttons placeholder (currently zero), not clutch yet.
  */
 #define STEER_RAW_MIN         -32767
@@ -74,9 +74,10 @@
 #define THROTTLE_RAW_REST          0
 #define THROTTLE_RAW_FULL      32767
 #define THROTTLE_ZERO_PERCENT    1U  /* ignore the first 1% of travel */
-#define BRAKE_RAW_MIN              0
+#define BRAKE_RAW_MIN              0  /* valid Pi range; rest may drift below 30454 */
 #define BRAKE_RAW_MAX          32767
-#define BRAKE_PRESSED_AT       16384  /* provisional midpoint */
+#define BRAKE_RAW_REST         30454  /* measured reference, not a validity limit */
+#define BRAKE_PRESSED_AT       31610  /* midpoint of measured pedal range */
 #define BRAKE_PRESSED_HIGH        1   /* use 0 if values fall when pressed */
 #define CLUTCH_RAW_MIN            0U
 #define CLUTCH_RAW_MAX          255U
