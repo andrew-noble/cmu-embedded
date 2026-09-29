@@ -17,5 +17,6 @@ if(MOTOR_CALIBRATION)
   target_include_directories(app PRIVATE src tools/motor_calibration)
   target_sources(app PRIVATE tools/motor_calibration/motor_calibration.c)
 else()
-  target_sources(app PRIVATE src/main.c src/motor_control.c src/blinker.c)
+  target_sources(app PRIVATE src/main.c src/motor_control.c src/blinker.c
+                             src/status_tx.c src/testpoint.c)
 endif()

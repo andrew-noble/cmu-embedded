@@ -4,6 +4,7 @@
 #include "encoder.h"
 #include "motor_control.h"
 #include "motor_driver.h"
+#include "testpoint.h"
 
 static struct k_spinlock motor_lock;
 static struct motor_command latest_command;
@@ -222,6 +223,9 @@ static void motor_thread(void *p1, void *p2, void *p3)
 				if (motor_driver_drive(reverse, duty) != 0) {
 					motor_fault = true;
 					motor_driver_brake();
+				} else if (new_command) {
+					/* PWM_SET: duty written for a new Pi command (R2.1 timing). */
+					testpoint_toggle(TP_PWM_SET);
 				}
 			} else {
 				motor_driver_brake();

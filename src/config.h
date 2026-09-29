@@ -14,30 +14,61 @@
 #define CMD_DLC                 8
 #define CRC8_POLYNOMIAL         0x07
 #define CRC8_INITIAL            0x00
-#define UART_RX_QUEUE_DEPTH     64
-#define UART_RX_QUEUE_ALIGNMENT 1
-#define UART_RX_WAIT_MS         5
-#define LINK_TIMEOUT_MS         95  /* polled every 5 ms; target 100 ms */
+#define UART_RX_QUEUE_DEPTH     1   /* frames, not bytes: keep only the newest */
+#define UART_RX_QUEUE_ALIGNMENT 1   /* FRAME_LEN (13) is odd, so alignment must be 1 */
+/* One-shot link watchdog, restarted on every valid command. The Pi sends at
+ * least every 50 ms, so 150 ms = three consecutive missed updates (Part 2).
+ * Fail-safe is entered within microseconds of expiry. */
+#define LINK_TIMEOUT_MS         150
 #define PRINT_EVERY             10  /* valid frames */
 #define MAIN_PRINT_PERIOD_MS    100
 
 /* Encoder and motor scheduling. */
 #define ENC_PERIOD_MS           10
-#define MOTOR_STACK_SIZE        2048
-#define MOTOR_PRIORITY          0
 #define MOTOR_INTEGRAL_LIMIT_RPM_MS 500000LL
 
 /* Blinker timing and thread. Half-periods give 1 Hz turns and 2 Hz hazards. */
 #define TURN_HALF_PERIOD_MS     500
 #define HAZARD_HALF_PERIOD_MS   250
+
+/* Thread priorities and stacks: the Part 4 task table.
+ * Zephyr: lower number = higher priority; all are preemptive.
+ * The motor thread sits above cmd_handler so a submitted brake or throttle
+ * command is applied before cmd_handler continues (2 ms path, R2.1/R2.2). */
+#define MOTOR_PRIORITY          0   /* 10 ms PID + immediate step per command */
+#define FAIL_SAFE_PRIORITY      1   /* wakes only on link_timer expiry */
+#define CMD_HANDLER_PRIORITY    2   /* one run per valid frame from the Pi */
+#define STATUS_TX_PRIORITY      3   /* 20 ms status frame */
+#define BLINKER_PRIORITY        4   /* partner's blinker thread */
+#define MOTOR_STACK_SIZE        2048
+#define FAIL_SAFE_STACK_SIZE    1024
+#define CMD_HANDLER_STACK_SIZE  2048
+#define STATUS_TX_STACK_SIZE    1024
 #define BLINKER_STACK_SIZE      1024
-#define BLINKER_PRIORITY        2
+#define CMD_HANDLER_START_DELAY_MS 10000
+
+/* STM32-to-Pi status frame: same 13-byte layout as the command frame, with
+ * ID 0x200. Data = three current-sensor readings (mV, uint16 LE), zone state,
+ * sequence counter. Readings are millivolts until the sensor scale is known. */
+#define STATUS_PERIOD_MS        20  /* R4.5 substitute: 20 ms +/- 10% */
+#define STATUS_ID_HI            0x02
+#define STATUS_ID_LO            0x00
+#define STATUS_DLC              8
+#define STATUS_ADC_SAMPLES      8   /* averaged per channel per frame */
+#define STATUS_CURRENT_INVALID  0xFFFF
+/* 0 until USART1 has a TX pin: PB6 drives right motor IN3 and PA9 is the
+ * right encoder. While 0, frames are built but not sent, and readings are
+ * printed once per STATUS_PRINT_EVERY frames instead. */
+#define STATUS_TX_ENABLED       1
+#define STATUS_PRINT_EVERY      50
 
 /* Current Pi bridge.c documents pedal values as 0..32767 and sends their
  * 16-bit patterns little-endian. Negative readings are rejected until live
  * Pi output resolves the conflict with the reported -32767 release value.
  * Byte 10 is a buttons placeholder (currently zero), not clutch yet.
  */
+#define STEER_RAW_MIN         -32767
+#define STEER_RAW_MAX          32766
 #define THROTTLE_RAW_MIN           0
 #define THROTTLE_RAW_MAX       32767
 #define THROTTLE_RAW_REST          0
