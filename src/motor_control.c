@@ -45,13 +45,17 @@ void motor_control_get_telemetry(struct motor_telemetry *telemetry)
 
 static int32_t clamp_duty(int64_t duty)
 {
-	if (duty < 0) {
+	if (duty <= 0) {
 		return 0;
 	}
 	if (duty > MOTOR_MAX_DUTY_PERCENT) {
 		return MOTOR_MAX_DUTY_PERCENT;
 	}
-	return (int32_t)duty;
+	/* Compensate the low-duty region while retaining the full control range.
+	 * Telemetry reports the actual PWM sent to the motor driver. */
+	return MOTOR_DUTY_OFFSET_PERCENT +
+		(int32_t)((duty * (MOTOR_MAX_DUTY_PERCENT - MOTOR_DUTY_OFFSET_PERCENT) +
+			   MOTOR_MAX_DUTY_PERCENT / 2) / MOTOR_MAX_DUTY_PERCENT);
 }
 
 static int32_t rpm_magnitude(int32_t rpm)
@@ -87,6 +91,8 @@ BUILD_ASSERT(BRAKE_RAW_MIN <= BRAKE_PRESSED_AT &&
 BUILD_ASSERT(CLUTCH_RAW_MIN <= CLUTCH_PRESSED_AT &&
 	     CLUTCH_PRESSED_AT <= CLUTCH_RAW_MAX);
 BUILD_ASSERT(MOTOR_MAX_DUTY_PERCENT > 0 && MOTOR_MAX_DUTY_PERCENT <= 100);
+BUILD_ASSERT(MOTOR_DUTY_OFFSET_PERCENT >= 0 &&
+	     MOTOR_DUTY_OFFSET_PERCENT < MOTOR_MAX_DUTY_PERCENT);
 
 static void control_tick(struct k_timer *timer)
 {

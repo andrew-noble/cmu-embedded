@@ -1,13 +1,17 @@
 /*
  * Nucleo-F401RE overlay
  *
- * USART1 (Pi link) stays on the board default pins: PB6 = TX, PB7 = RX.
+ * USART1 (Pi link) receives on PB7 only. PB6 (D10) drives right motor IN3.
  * Encoders use two timers in quadrature-decoder mode:
  *   Left  encoder: TIM3, CH1 = PB4 (D5), CH2 = PC7 (D9)
  *   Right encoder: TIM1, CH1 = PA8 (D7), CH2 = PA9 (D8)
  */
 
 /* Keep the Pi link's RX line idle-high when the cable is unplugged. */
+&usart1 {
+	pinctrl-0 = <&usart1_rx_pb7>;
+};
+
 &usart1_rx_pb7 {
 	bias-pull-up;
 };
@@ -45,7 +49,7 @@
 		pinctrl-names = "default";
 		st,encoder-mode = <0x3>;           /* x4: count every edge of A and B */
 		st,input-filter-level = <10>;      /* reject glitches shorter than ~1 us */
-		st,counts-per-revolution = <3960>; /* per WHEEL revolution; measure and update */
+		st,counts-per-revolution = <1316>; /* measured wheel average 1316.2, rounded */
 	};
 };
 
@@ -58,7 +62,7 @@
 		pinctrl-names = "default";
 		st,encoder-mode = <0x3>;
 		st,input-filter-level = <10>;
-		st,counts-per-revolution = <3960>;
+		st,counts-per-revolution = <1316>; /* same measured average as left */
 	};
 };
 
@@ -68,14 +72,14 @@
 	pinctrl-names = "default";
 };
 
-/* L298N inputs: left D2/D4, right D12/D11. */
+/* L298N inputs: left D2/D4, right D10/D11. */
 / {
 	zephyr,user {
 		pwms = <&pwm2 2 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
 		       <&pwm2 3 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
 		left-in1-gpios = <&gpioa 10 GPIO_ACTIVE_HIGH>;
 		left-in2-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
-		right-in1-gpios = <&gpioa 6 GPIO_ACTIVE_HIGH>;
+		right-in1-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
 		right-in2-gpios = <&gpioa 7 GPIO_ACTIVE_HIGH>;
 		/* TODO: after confirming four unused wired pins, add all four:
 		 * blinker-left-front-gpios = <&gpioX PIN GPIO_ACTIVE_HIGH>;

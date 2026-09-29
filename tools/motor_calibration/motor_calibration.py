@@ -25,8 +25,12 @@ def parse_steps(value):
 
 
 def send(port, command):
-    port.write((command + "\n").encode("ascii"))
-    port.flush()
+    # The calibration console polls RX every 5 ms on an MCU without a UART
+    # RX FIFO. Pace characters so a whole command is not lost to overrun.
+    for value in (command + "\n").encode("ascii"):
+        port.write(bytes([value]))
+        port.flush()
+        time.sleep(0.01)
 
 
 def read_line(port):
@@ -41,6 +45,8 @@ def wait_for_arm(port, timeout_s=5.0):
             send(port, "CAL ARM")
             next_attempt = time.monotonic() + 0.5
         line = read_line(port)
+        if line:
+            print(f"Board: {line}", flush=True)
         if line.startswith("CAL_ARMED,max_duty="):
             return int(line.split("=", 1)[1])
         if line.startswith("CAL_ERROR,") and line != "CAL_ERROR,not_ready":
@@ -182,6 +188,7 @@ def main():
                                      "in tools/motor_calibration/motor_calibration_config.h and rebuild")
                 print(f"Calibration armed; firmware cap is {max_duty}%")
                 for index, duty in enumerate(args.steps):
+                    print(f"Requesting {duty}% duty for {args.dwell_s:g} seconds", flush=True)
                     summary = collect_step(port, duty, args.dwell_s, args.settle_s,
                                            index, raw_writer, args.radius_m)
                     raw_file.flush()

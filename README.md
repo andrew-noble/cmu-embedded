@@ -49,10 +49,14 @@ Zephyr pin assignments and PWM period
 stay in [`boards/nucleo_f401re.overlay`](boards/nucleo_f401re.overlay), and
 driver options stay in [`prj.conf`](prj.conf).
 
-The motor code uses D3/D6 for L298N enable PWM and D2/D4/D12/D11 for direction
+The motor code uses D3/D6 for L298N enable PWM and D2/D4/D10/D11 for direction
 inputs. The two encoder counters still run in hardware. One control thread wakes
 for a valid UART command or a 10 ms encoder sample. Brake takes priority and
 puts both L298N channels in dynamic braking (equal inputs, enable held high).
+The normal controller maps positive output into 20–100% actual PWM, configured
+by `MOTOR_DUTY_OFFSET_PERCENT`: 50% controller output gives 60% PWM and 100%
+gives 100%. Zero output still stops. Telemetry reports actual PWM; the separate
+calibration tool sends direct percentages without this offset.
 Throttle selects a target RPM; a PID loop uses the average of the two wheel
 speeds. Clutch handling is scaffolded but disabled: the motor starts and stays
 in forward direction. Once the Pi sends a real clutch value, a new press past
@@ -77,7 +81,9 @@ output range, not a current limit. A valid throttle command above the 1% deadban
 motors when brake is below its provisional threshold. Confirm pedal values and
 motor direction before testing on the ground. The encoder counts-per-revolution setting is in
 `boards/nucleo_f401re.overlay`; PWM pin mapping and 1 kHz period are there too.
-No physical motor response or 2 ms timing measurement has been performed.
+Wheel-up motor response and manual encoder counts were measured; see
+[the recorded measurements](tools/motor_calibration/MEASUREMENTS.md).
+Loaded behavior and the 2 ms timing requirement remain unverified.
 The link watchdog uses 95 ms plus a 5 ms receive wait to target the PDF's
 stricter 100 ms unplug checkoff; an earlier PDF paragraph says 150 ms.
 
@@ -122,7 +128,8 @@ writes timestamped sample and summary CSV files under
 last 1.5 seconds of each three-second step. No wheel radius is needed to collect
 RPM. Once the radius is known, pass `--radius-m 0.05` (replace `0.05` with the
 measured radius) to add speed in m/s to the summary. Verify the encoder's
-3960 counts-per-wheel-revolution setting before treating the RPM as calibrated.
+1316 counts-per-wheel-revolution setting against additional manual turns if
+greater precision is needed; it is rounded from the measured average of 1316.2.
 To use smaller steps, pass a list such as `--steps 0,5,10,15,20`. The current
 sensors are not yet read by firmware, so this sweep records RPM only. After the
 experiment, flash the normal build from

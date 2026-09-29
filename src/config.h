@@ -56,6 +56,9 @@
 /* Allow the controller to command the full PWM range. */
 #define MOTOR_OUTPUTS_ENABLED     1
 #define MOTOR_MAX_DUTY_PERCENT  100
+/* Normal controller only: positive output maps into 20..100% actual PWM.
+ * Zero still stops; calibration commands remain direct duty percentages. */
+#define MOTOR_DUTY_OFFSET_PERCENT 20
 
 #define MOTOR_MAX_RPM           120
 #define MOTOR_SHIFT_MAX_RPM       5
