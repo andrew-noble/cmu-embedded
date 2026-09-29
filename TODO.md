@@ -1,0 +1,9 @@
+# Lab 2 follow-ups
+
+- [ ] **Pi clutch command:** Have the Pi send a real clutch control value and define its meaning in the UART frame. Byte 10 is currently a zero-filled buttons placeholder. Then connect it to the Nucleo direction control and test forward/reverse transitions.
+- [ ] **Pedal ranges and thresholds:** Record live throttle, brake, and clutch values at rest, partial press, and full press. Update the accepted ranges, directions, and thresholds in `src/config.h`; the current 0–32767 pedal range and brake midpoint are provisional.
+- [ ] **Steering servo model:** Provide the servo model, supply voltage, and linkage travel. Determine its pulse period and safe pulse widths for full left, center, and full right. Complete the nonfunctional placeholder at `tools/servo_calibration/servo_calibration.py`; the motor calibration tool cannot calibrate servo endpoints.
+- [ ] **Current sensor model:** Provide the Hall sensor part number/module, supply voltage, output range, zero-current output, and volts-per-amp sensitivity. Verify the outputs are safe for the Nucleo ADC. A0/A1 are planned for the two motors; identify the servo-current sensor pin too.
+- [ ] **Blinker wiring and controls:** Assign four unused GPIO pins in `boards/nucleo_f401re.overlay`. Define Pi button commands and steering turn/return thresholds for left/right selection and self-cancel. Until then, only the hazard/off state is selected by firmware; physical LEDs are unmapped.
+- [ ] **Motor validation:** Measure encoder counts per wheel revolution, motor current and RPM across 0–100% duty, and loaded behavior. Tune the provisional 120 RPM target and PI gains from measurements. A PWM percentage is not a current limit.
+- [ ] **Lab status frame:** Send the required periodic Nucleo-to-Pi status frame with current readings and zone state after the current sensors and UART response format are defined.

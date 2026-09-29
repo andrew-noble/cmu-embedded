@@ -38,40 +38,95 @@ sample before attaching external hardware.
 
 Code map: [`src/main.c`](src/main.c) receives and checks UART commands;
 [`src/encoder.c`](src/encoder.c) samples the two hardware encoder counters;
-[`src/motor.c`](src/motor.c) runs PWM, braking, clutch direction changes, and
-PID. Their small `.h` files expose only the data and functions shared between
-modules. Change pedal ranges and tuning in [`src/motor_config.h`](src/motor_config.h).
+[`src/motor_control.c`](src/motor_control.c) runs the normal speed controller;
+[`src/motor_driver.c`](src/motor_driver.c) applies PWM, direction, and braking;
+[`src/blinker.c`](src/blinker.c) runs the blinker timer and GPIO outputs.
+Their small `.h` files expose only the data and functions shared between
+modules. Edit shared timing, pedal ranges, and motor tuning in
+[`src/config.h`](src/config.h). Calibration-only settings live in
+[`tools/motor_calibration/motor_calibration_config.h`](tools/motor_calibration/motor_calibration_config.h).
+Zephyr pin assignments and PWM period
+stay in [`boards/nucleo_f401re.overlay`](boards/nucleo_f401re.overlay), and
+driver options stay in [`prj.conf`](prj.conf).
 
 The motor code uses D3/D6 for L298N enable PWM and D2/D4/D12/D11 for direction
 inputs. The two encoder counters still run in hardware. One control thread wakes
 for a valid UART command or a 10 ms encoder sample. Brake takes priority and
 puts both L298N channels in dynamic braking (equal inputs, enable held high).
 Throttle selects a target RPM; a PID loop uses the average of the two wheel
-speeds. Clutch is treated as an analog pedal: a new press past its threshold
-toggles forward/reverse only when throttle is zero and both wheels are stopped.
+speeds. Clutch handling is scaffolded but disabled: the motor starts and stays
+in forward direction. Once the Pi sends a real clutch value, a new press past
+its threshold can toggle direction only at zero throttle with both wheels stopped.
 
-The existing 13-byte UART frame is provisionally interpreted as: start `A5`,
-ID `01 00`, DLC `08`, steering signed 16-bit little-endian, throttle unsigned
-16-bit little-endian, brake unsigned 16-bit little-endian, clutch unsigned
-8-bit, sequence unsigned 8-bit, CRC-8. Steering is decoded but steering servo
-control is not implemented yet. **No Pi `bridge.c` exists in this repository or
-its available branches**, so the sender must be checked against this layout.
-An 8-bit clutch requires the Pi to scale its original pedal reading to 0–255.
+The Pi's `/home/team5/proxy_receiver/bridge.c` sends a 13-byte UART frame:
+start `A5`, ID `01 00`, DLC `08`, steering, throttle, and brake as 16-bit
+little-endian fields, byte 10 as a buttons placeholder (currently zero),
+sequence byte, and CRC-8. The Pi source documents pedal values as 0–32767,
+which this firmware now accepts. A reported released value of -32767 conflicts
+with that comment; such a reading is rejected until live Pi output resolves the
+range. Steering is decoded, but steering servo control is not implemented yet.
+Byte 10 is ignored for clutch until the Pi sender is extended.
 
-Edit [the motor settings](src/motor_config.h) after checking actual pedal
+Edit [the motor settings](src/config.h) after checking actual pedal
 ranges, rest/pressed directions, motor polarity, counts per wheel revolution,
-and safe maximum RPM. The present 0–1000 throttle/brake ranges and PID gains
-are initial placeholders. Set `THROTTLE_RAW_REST` and `THROTTLE_RAW_FULL` to
-the actual readings; the code handles either direction. Brake and clutch each
-have a threshold and `PRESSED_HIGH` switch. `MOTOR_OUTPUTS_ENABLED` starts at
-`0`: firmware can
-read commands and compute a duty value but holds both motors in dynamic braking.
-Only set it to `1` after verifying the Pi packet and motor wiring with wheels
-lifted. The encoder counts-per-revolution setting is in
+and safe maximum RPM. The throttle endpoints now match the Pi source's stated
+0–32767 range; the brake threshold (16384), max RPM, and PID gains are starting
+points to verify. `CLUTCH_CONTROL_ENABLED` remains `0` for forward-only mode.
+`MOTOR_OUTPUTS_ENABLED` is `1`, and PWM duty may reach 100%; this is a software
+output range, not a current limit. A valid throttle command above the 1% deadband can drive the
+motors when brake is below its provisional threshold. Confirm pedal values and
+motor direction before testing on the ground. The encoder counts-per-revolution setting is in
 `boards/nucleo_f401re.overlay`; PWM pin mapping and 1 kHz period are there too.
 No physical motor response or 2 ms timing measurement has been performed.
 The link watchdog uses 95 ms plus a 5 ms receive wait to target the PDF's
 stricter 100 ms unplug checkoff; an earlier PDF paragraph says 150 ms.
+
+The blinker module uses a periodic Zephyr timer and a lower-priority thread,
+with no delay in the UART or motor path. It supports 1 Hz left/right turns and
+2 Hz hazards, both at 50% duty. Power-up, malformed input, and link loss select
+hazards; a valid Pi command clears them. Four LED GPIO properties are left as
+placeholders in the board overlay, so no physical LEDs are driven yet. Pi button
+selection and steering self-cancel need the command mapping and turn threshold.
+See [TODO.md](TODO.md) for the missing hardware and Pi information.
+The [servo calibration placeholder](tools/servo_calibration/servo_calibration.py)
+does not generate a servo signal; it needs the servo model and linkage limits.
+
+## Measure PWM versus wheel speed
+
+The normal firmware uses PID, so its PWM duty changes as it corrects speed.
+For an open-loop duty-versus-speed measurement, build the separate calibration
+firmware. Its C sources and laptop script live together in
+[`tools/motor_calibration/`](tools/motor_calibration/). CMake selects those test
+sources only when `MOTOR_CALIBRATION=ON`; the normal motor controller contains
+no calibration branches. The test firmware starts braked, uses forward direction
+only, and accepts exact
+`CAL ARM`, `CAL DUTY n`, and `CAL STOP` commands over the Nucleo ST-LINK USB
+serial console (USART2, 115200 baud). It brakes if commands stop for 500 ms.
+Duty commands use whole percentages from 0 to 100. Calibration now permits the
+full range, as does the normal motor controller.
+
+With both driven wheels raised, build and flash the calibration firmware:
+
+```bash
+source .venv/bin/activate
+west build -b nucleo_f401re . -d build/motor-calibration-f401re -- -DMOTOR_CALIBRATION=ON
+west flash -d build/motor-calibration-f401re -r stm32cubeprogrammer
+python tools/motor_calibration/motor_calibration.py --list-ports
+python tools/motor_calibration/motor_calibration.py --port /dev/ttyACM0 --arm
+```
+
+Use the actual port shown by `--list-ports`. The Python script sends fixed
+0–100% duty steps in 10% increments, records both encoder positions and RPM every 100 ms, and
+writes timestamped sample and summary CSV files under
+`tools/motor_calibration/data/` (ignored by Git). It averages the
+last 1.5 seconds of each three-second step. No wheel radius is needed to collect
+RPM. Once the radius is known, pass `--radius-m 0.05` (replace `0.05` with the
+measured radius) to add speed in m/s to the summary. Verify the encoder's
+3960 counts-per-wheel-revolution setting before treating the RPM as calibrated.
+To use smaller steps, pass a list such as `--steps 0,5,10,15,20`. The current
+sensors are not yet read by firmware, so this sweep records RPM only. After the
+experiment, flash the normal build from
+`build/lab2-sang-f401re` to restore Pi control.
 
 The course's *Flashing and Debugging Your Nucleo* guide lists
 **STM32CubeProgrammer as required** and notes that OpenOCD is included with

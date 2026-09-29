@@ -2,6 +2,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
 
+#include "config.h"
 #include "encoder.h"
 
 /* Hardware timers count both encoders in quadrature (x4) mode.

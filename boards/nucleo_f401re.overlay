@@ -77,5 +77,11 @@
 		left-in2-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
 		right-in1-gpios = <&gpioa 6 GPIO_ACTIVE_HIGH>;
 		right-in2-gpios = <&gpioa 7 GPIO_ACTIVE_HIGH>;
+		/* TODO: after confirming four unused wired pins, add all four:
+		 * blinker-left-front-gpios = <&gpioX PIN GPIO_ACTIVE_HIGH>;
+		 * blinker-left-rear-gpios = <&gpioX PIN GPIO_ACTIVE_HIGH>;
+		 * blinker-right-front-gpios = <&gpioX PIN GPIO_ACTIVE_HIGH>;
+		 * blinker-right-rear-gpios = <&gpioX PIN GPIO_ACTIVE_HIGH>;
+		 */
 	};
 };

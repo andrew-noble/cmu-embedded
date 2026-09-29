@@ -2,21 +2,15 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 
-#include "motor.h"
+#include "blinker.h"
+#include "config.h"
+#include "motor_control.h"
 
 /* Pi link: interrupt receives bytes; main parses complete commands. */
 #define UART_DEVICE_NODE DT_NODELABEL(usart1)
 
-/* Provisional frame format; verify against the Pi sender. */
-#define UART_SOF        0xA5
-#define FRAME_LEN       13      /* SOF + ID(2) + DLC + data(8) + CRC */
-#define CMD_ID_HI       0x01    /* ID 0x100 */
-#define CMD_ID_LO       0x00
-#define CMD_DLC         8
-#define LINK_TIMEOUT_MS 95      /* checked every 5 ms; meet 100 ms checkoff */
-#define PRINT_EVERY     10      /* print 1 of every N valid frames */
-
-K_MSGQ_DEFINE(rx_q, sizeof(uint8_t), 64, 1);  /* Raw bytes from the ISR to the parser. A full queue drops new bytes. */
+K_MSGQ_DEFINE(rx_q, sizeof(uint8_t), UART_RX_QUEUE_DEPTH,
+	      UART_RX_QUEUE_ALIGNMENT);  /* Raw bytes from ISR to parser. */
 static const struct device *const uart_device = DEVICE_DT_GET(UART_DEVICE_NODE); /* Pointer to Zephyr's USART1 device object. */
 
 
@@ -35,14 +29,14 @@ static void serial_cb(const struct device *device, void *user_data) /* ISR: move
 }
 
 
-static uint8_t crc8(const uint8_t *buf, size_t len) /* CRC-8, poly 0x07, init 0x00. */
+static uint8_t crc8(const uint8_t *buf, size_t len) /* CRC-8 settings match Pi. */
 {
-	uint8_t crc = 0x00;
+	uint8_t crc = CRC8_INITIAL;
 
 	for (size_t i = 0; i < len; i++) {
 		crc ^= buf[i];
 		for (int b = 0; b < 8; b++) {
-			crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07)
+			crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ CRC8_POLYNOMIAL)
 					   : (uint8_t)(crc << 1);
 		}
 	}
@@ -91,6 +85,9 @@ int main(void)
 	int64_t last_print_ms = 0;
 	uint32_t n_valid = 0, n_bad = 0;
 
+	/* Power-up is an error state until a valid Pi command arrives. */
+	blinker_set_mode(BLINKER_HAZARD);
+
 	if (!device_is_ready(uart_device)) {
 		printk("USART1 not ready, check overlay\n");
 		return 0;
@@ -112,21 +109,22 @@ int main(void)
 
 		/* Wait at most 5 ms for a byte, so the link check below
 		 * still runs when nothing is arriving. */
-		if (k_msgq_get(&rx_q, &c, K_MSEC(5)) == 0) {
+		if (k_msgq_get(&rx_q, &c, K_MSEC(UART_RX_WAIT_MS)) == 0) {
 			int r = parse_byte(c);
 
 			if (r > 0) {
 				int16_t steer = (int16_t)(uint16_t)(frame[4] | (frame[5] << 8));
 				struct motor_command command = {
-					.throttle = (uint16_t)(frame[6] | (frame[7] << 8)),
-					.brake = (uint16_t)(frame[8] | (frame[9] << 8)),
-					.clutch = frame[10],
+					.throttle = (int16_t)(uint16_t)(frame[6] | (frame[7] << 8)),
+					.brake = (int16_t)(uint16_t)(frame[8] | (frame[9] << 8)),
+					.clutch = 0, /* Pi bridge.c sends buttons placeholder, not clutch. */
 					.valid = true,
 				};
 
-				if (!motor_submit(command)) {
+				if (!motor_control_submit(command)) {
 					n_bad++;
 					link_ok = false;
+					blinker_set_mode(BLINKER_HAZARD);
 					continue;
 				}
 
@@ -135,17 +133,21 @@ int main(void)
 
 				if (!link_ok) {
 					link_ok = true;
+					blinker_set_mode(BLINKER_OFF);
 					printk("LINK UP\n");
 				}
 
 				if (n_valid % PRINT_EVERY == 0) {
-					printk("steer %6d  thr %5u  brk %5u  clutch %3u  seq %3u  bad %u\n",
-					       steer, (unsigned)command.throttle,
-					       (unsigned)command.brake, (unsigned)command.clutch,
+					printk("steer %6d  thr %6d  brk %6d  buttons %3u  seq %3u  bad %u\n",
+					       steer, (int)command.throttle,
+					       (int)command.brake, (unsigned)frame[10],
 					       (unsigned)frame[11], (unsigned)n_bad);
 				}
 			} else if (r < 0) {
 				n_bad++;
+				link_ok = false;
+				motor_control_submit((struct motor_command) { 0 });
+				blinker_set_mode(BLINKER_HAZARD);
 			}
 		}
 
@@ -154,20 +156,21 @@ int main(void)
 
 			if (elapsed > LINK_TIMEOUT_MS) {
 				link_ok = false;
-				motor_submit((struct motor_command) { 0 });
+				motor_control_submit((struct motor_command) { 0 });
+				blinker_set_mode(BLINKER_HAZARD);
 				printk("LINK LOST (%d ms since last valid frame)\n",
 				       (int)elapsed);
 			}
 		}
 
-		if (k_uptime_get() - last_print_ms >= 100) {
+		if (k_uptime_get() - last_print_ms >= MAIN_PRINT_PERIOD_MS) {
 			struct motor_telemetry telemetry;
-			motor_get_telemetry(&telemetry);
+			motor_control_get_telemetry(&telemetry);
 			last_print_ms = k_uptime_get();
-			printk("ENC L %8d %5d rpm | R %8d %5d rpm | target %3d duty %4d %s\n",
+			printk("ENC L %8d %5d rpm | R %8d %5d rpm | target %3d duty %3d%% %s\n",
 			       (int)telemetry.left_position, (int)telemetry.left_rpm,
 			       (int)telemetry.right_position, (int)telemetry.right_rpm,
-			       (int)telemetry.target_rpm, (int)telemetry.duty_permille,
+			       (int)telemetry.target_rpm, (int)telemetry.duty_percent,
 			       telemetry.reverse ? "REV" : "FWD");
 		}
 	}

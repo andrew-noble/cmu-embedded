@@ -10,4 +10,12 @@ endif()
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(lab2_sensors_actuators)
 
-target_sources(app PRIVATE src/main.c src/encoder.c src/motor.c)
+option(MOTOR_CALIBRATION "Build fixed-duty motor calibration firmware" OFF)
+
+target_sources(app PRIVATE src/encoder.c src/motor_driver.c)
+if(MOTOR_CALIBRATION)
+  target_include_directories(app PRIVATE src tools/motor_calibration)
+  target_sources(app PRIVATE tools/motor_calibration/motor_calibration.c)
+else()
+  target_sources(app PRIVATE src/main.c src/motor_control.c src/blinker.c)
+endif()

@@ -1,31 +1,17 @@
 #include <zephyr/kernel.h>
-#include <zephyr/device.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/pwm.h>
 
+#include "config.h"
 #include "encoder.h"
-#include "motor.h"
-#include "motor_config.h"
-
-/* L298N outputs and closed-loop control live together in this module. */
-#define MOTOR_NODE DT_PATH(zephyr_user)
-
-static const struct pwm_dt_spec left_pwm = PWM_DT_SPEC_GET_BY_IDX(MOTOR_NODE, 0);
-static const struct pwm_dt_spec right_pwm = PWM_DT_SPEC_GET_BY_IDX(MOTOR_NODE, 1);
-static const struct gpio_dt_spec left_in1 = GPIO_DT_SPEC_GET(MOTOR_NODE, left_in1_gpios);
-static const struct gpio_dt_spec left_in2 = GPIO_DT_SPEC_GET(MOTOR_NODE, left_in2_gpios);
-static const struct gpio_dt_spec right_in1 = GPIO_DT_SPEC_GET(MOTOR_NODE, right_in1_gpios);
-static const struct gpio_dt_spec right_in2 = GPIO_DT_SPEC_GET(MOTOR_NODE, right_in2_gpios);
+#include "motor_control.h"
+#include "motor_driver.h"
 
 static struct k_spinlock motor_lock;
 static struct motor_command latest_command;
 static struct motor_telemetry latest_telemetry;
 static uint32_t command_generation;
-static bool drive_active;
-static bool drive_reverse;
 K_SEM_DEFINE(motor_wake, 0, 1);
 
-bool motor_submit(struct motor_command command)
+bool motor_control_submit(struct motor_command command)
 {
 	bool accepted = command.valid &&
 		command.throttle >= THROTTLE_RAW_MIN &&
@@ -49,7 +35,7 @@ bool motor_submit(struct motor_command command)
 }
 
 
-void motor_get_telemetry(struct motor_telemetry *telemetry)
+void motor_control_get_telemetry(struct motor_telemetry *telemetry)
 {
 	k_spinlock_key_t key = k_spin_lock(&motor_lock);
 
@@ -57,84 +43,13 @@ void motor_get_telemetry(struct motor_telemetry *telemetry)
 	k_spin_unlock(&motor_lock, key);
 }
 
-static int motor_brake(void)
-{
-	/* L298N: EN high with both inputs equal gives dynamic braking.
-	 * EN low would let the wheel coast, so "PWM disabled" means constant high.
-	 */
-	drive_active = false;
-	int rc = gpio_pin_set_dt(&left_in1, 0);
-
-	rc |= gpio_pin_set_dt(&left_in2, 0);
-	rc |= gpio_pin_set_dt(&right_in1, 0);
-	rc |= gpio_pin_set_dt(&right_in2, 0);
-	rc |= pwm_set_pulse_dt(&left_pwm, left_pwm.period);
-	rc |= pwm_set_pulse_dt(&right_pwm, right_pwm.period);
-	return rc;
-}
-
-static int motor_drive(bool reverse, int32_t duty_permille)
-{
-	int left_forward = LEFT_FORWARD_IN1_HIGH;
-	int right_forward = RIGHT_FORWARD_IN1_HIGH;
-
-	if (reverse) {
-		left_forward = !left_forward;
-		right_forward = !right_forward;
-	}
-
-	int rc = 0;
-
-	if (!drive_active || drive_reverse != reverse) {
-		/* Disable enables before a direction change. */
-		rc = pwm_set_pulse_dt(&left_pwm, 0);
-		rc |= pwm_set_pulse_dt(&right_pwm, 0);
-		rc |= gpio_pin_set_dt(&left_in1, left_forward);
-		rc |= gpio_pin_set_dt(&left_in2, !left_forward);
-		rc |= gpio_pin_set_dt(&right_in1, right_forward);
-		rc |= gpio_pin_set_dt(&right_in2, !right_forward);
-		if (rc != 0) {
-			return rc;
-		}
-	}
-
-	uint32_t left_pulse = (uint32_t)((uint64_t)left_pwm.period * duty_permille / 1000);
-	uint32_t right_pulse = (uint32_t)((uint64_t)right_pwm.period * duty_permille / 1000);
-
-	rc = pwm_set_pulse_dt(&left_pwm, left_pulse);
-	rc |= pwm_set_pulse_dt(&right_pwm, right_pulse);
-	if (rc == 0) {
-		drive_active = true;
-		drive_reverse = reverse;
-	}
-	return rc;
-}
-
-static bool motor_hardware_ready(void)
-{
-	const struct gpio_dt_spec *pins[] = {
-		&left_in1, &left_in2, &right_in1, &right_in2
-	};
-
-	if (!pwm_is_ready_dt(&left_pwm) || !pwm_is_ready_dt(&right_pwm)) {
-		return false;
-	}
-	for (size_t i = 0; i < ARRAY_SIZE(pins); i++) {
-		if (!gpio_is_ready_dt(pins[i]) ||
-		    gpio_pin_configure_dt(pins[i], GPIO_OUTPUT_INACTIVE) != 0) {
-			return false;
-		}
-	}
-	return motor_brake() == 0;
-}
-
 static int32_t clamp_duty(int64_t duty)
 {
 	if (duty < 0) {
 		return 0;
 	}
-	if (duty > 1000) {
-		return 1000;
+	if (duty > MOTOR_MAX_DUTY_PERCENT) {
+		return MOTOR_MAX_DUTY_PERCENT;
 	}
 	return (int32_t)duty;
 }
@@ -144,8 +59,8 @@ static int32_t rpm_magnitude(int32_t rpm)
 	return rpm < 0 ? -rpm : rpm;
 }
 
-/* Convert either increasing or decreasing throttle readings to 0..1000. */
-static int32_t throttle_permille(uint16_t raw)
+/* Round up so the 1% deadband still ends at 1% of raw pedal travel. */
+static int32_t throttle_percent(int16_t raw)
 {
 	int32_t travel = (int32_t)THROTTLE_RAW_FULL - THROTTLE_RAW_REST;
 	int32_t moved = (int32_t)raw - THROTTLE_RAW_REST;
@@ -154,10 +69,10 @@ static int32_t throttle_permille(uint16_t raw)
 		travel = -travel;
 		moved = -moved;
 	}
-	return CLAMP(moved * 1000 / travel, 0, 1000);
+	return CLAMP((moved * 100 + travel - 1) / travel, 0, 100);
 }
 
-static bool pedal_pressed(uint16_t raw, uint16_t threshold, bool pressed_high)
+static bool pedal_pressed(int32_t raw, int32_t threshold, bool pressed_high)
 {
 	return pressed_high ? raw >= threshold : raw <= threshold;
 }
@@ -171,6 +86,7 @@ BUILD_ASSERT(BRAKE_RAW_MIN <= BRAKE_PRESSED_AT &&
 	     BRAKE_PRESSED_AT <= BRAKE_RAW_MAX);
 BUILD_ASSERT(CLUTCH_RAW_MIN <= CLUTCH_PRESSED_AT &&
 	     CLUTCH_PRESSED_AT <= CLUTCH_RAW_MAX);
+BUILD_ASSERT(MOTOR_MAX_DUTY_PERCENT > 0 && MOTOR_MAX_DUTY_PERCENT <= 100);
 
 static void control_tick(struct k_timer *timer)
 {
@@ -179,7 +95,6 @@ static void control_tick(struct k_timer *timer)
 }
 
 K_TIMER_DEFINE(control_timer, control_tick, NULL);
-
 
 static void motor_thread(void *p1, void *p2, void *p3)
 {
@@ -196,7 +111,7 @@ static void motor_thread(void *p1, void *p2, void *p3)
 	int32_t left_rpm = 0, right_rpm = 0, target_rpm = 0, duty = 0;
 	bool reverse = false, clutch_was_pressed = false, motor_fault = false;
 	bool sensors_healthy = true;
-	bool hardware_ok = motor_hardware_ready();
+	bool hardware_ok = motor_driver_init();
 
 	if (!hardware_ok) {
 		printk("Motor hardware not ready, check overlay\n");
@@ -238,16 +153,17 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			}
 		}
 
-		int32_t throttle = throttle_permille(command.throttle);
-		bool clutch_pressed = pedal_pressed(command.clutch, CLUTCH_PRESSED_AT,
-						CLUTCH_PRESSED_HIGH);
+		int32_t throttle = throttle_percent(command.throttle);
+		bool clutch_pressed = CLUTCH_CONTROL_ENABLED &&
+			pedal_pressed(command.clutch, CLUTCH_PRESSED_AT,
+				      CLUTCH_PRESSED_HIGH);
 		bool brake_pressed = pedal_pressed(command.brake, BRAKE_PRESSED_AT,
 						BRAKE_PRESSED_HIGH);
 
 		/* A press toggles direction once, only with zero throttle and stopped wheels. */
 		if (new_command) {
 			if (command.valid && clutch_pressed && !clutch_was_pressed &&
-			    throttle <= THROTTLE_ZERO_PERMILLE &&
+			    throttle <= THROTTLE_ZERO_PERCENT &&
 			    rpm_magnitude(left_rpm) <= MOTOR_SHIFT_MAX_RPM &&
 			    rpm_magnitude(right_rpm) <= MOTOR_SHIFT_MAX_RPM) {
 				reverse = !reverse;
@@ -258,12 +174,12 @@ static void motor_thread(void *p1, void *p2, void *p3)
 		}
 
 		if (motor_fault || !sensors_healthy || !command.valid || brake_pressed ||
-		    throttle <= THROTTLE_ZERO_PERMILLE) {
+		    throttle <= THROTTLE_ZERO_PERCENT) {
 			target_rpm = 0;
 			duty = 0;
 			integral_rpm_ms = 0;
 			previous_error = 0;
-			if (motor_brake() != 0) {
+			if (motor_driver_brake() != 0) {
 				motor_fault = true;
 			}
 		} else if (ticks > 0 || new_command) {
@@ -271,31 +187,38 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			int32_t measured_rpm = (left_rpm + right_rpm) / 2;
 			int32_t directional_rpm = reverse ? -measured_rpm : measured_rpm;
 
-			target_rpm = throttle * MOTOR_MAX_RPM / 1000;
+			target_rpm = throttle * MOTOR_MAX_RPM / 100;
 			int32_t error = target_rpm - directional_rpm;
 
 			if (ticks > 0) {
 				integral_rpm_ms += (int64_t)error * sample_ms;
-				integral_rpm_ms = CLAMP(integral_rpm_ms, -500000LL, 500000LL);
+				integral_rpm_ms = CLAMP(integral_rpm_ms,
+					-MOTOR_INTEGRAL_LIMIT_RPM_MS,
+					MOTOR_INTEGRAL_LIMIT_RPM_MS);
 			}
 
-			int64_t correction = (int64_t)MOTOR_KP_PERMILLE_PER_RPM * error +
-				(int64_t)MOTOR_KI_PERMILLE_PER_RPM_S * integral_rpm_ms / 1000;
+			int64_t correction_tenths =
+				(int64_t)MOTOR_KP_TENTHS_PERCENT_PER_RPM * error +
+				(int64_t)MOTOR_KI_TENTHS_PERCENT_PER_RPM_S *
+				integral_rpm_ms / 1000;
 
 			if (ticks > 0) {
-				correction += (int64_t)MOTOR_KD_PERMILLE_S_PER_RPM *
+				correction_tenths += (int64_t)MOTOR_KD_TENTHS_PERCENT_S_PER_RPM *
 					(error - previous_error) * 1000 / sample_ms;
 				previous_error = error;
 			}
-			duty = clamp_duty((int64_t)MOTOR_FF_MAX_PERMILLE * target_rpm /
-					  MOTOR_MAX_RPM + correction);
+			int64_t duty_tenths =
+				(int64_t)MOTOR_FF_MAX_PERCENT * 10 * target_rpm /
+				MOTOR_MAX_RPM + correction_tenths;
+
+			duty = clamp_duty(duty_tenths / 10);
 			if (MOTOR_OUTPUTS_ENABLED && duty > 0) {
-				if (motor_drive(reverse, duty) != 0) {
+				if (motor_driver_drive(reverse, duty) != 0) {
 					motor_fault = true;
-					motor_brake();
+					motor_driver_brake();
 				}
 			} else {
-				motor_brake();
+				motor_driver_brake();
 			}
 		}
 
@@ -306,11 +229,12 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			.left_rpm = left_rpm,
 			.right_rpm = right_rpm,
 			.target_rpm = target_rpm,
-			.duty_permille = duty,
+			.duty_percent = duty,
 			.reverse = reverse,
 		};
 		k_spin_unlock(&motor_lock, key);
 	}
 }
 
-K_THREAD_DEFINE(motor_tid, 2048, motor_thread, NULL, NULL, NULL, 0, 0, 0);
+K_THREAD_DEFINE(motor_tid, MOTOR_STACK_SIZE, motor_thread,
+		NULL, NULL, NULL, MOTOR_PRIORITY, 0, 0);
