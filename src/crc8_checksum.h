@@ -1,5 +1,5 @@
-#ifndef CRC8_H_
-#define CRC8_H_
+#ifndef CRC8_CHECKSUM_H_
+#define CRC8_CHECKSUM_H_
 
 #include <stddef.h>
 #include <stdint.h>

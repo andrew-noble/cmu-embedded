@@ -55,10 +55,20 @@ for a valid UART command or a 10 ms encoder sample. Brake takes priority and
 puts both L298N channels in dynamic braking (equal inputs, enable held high).
 The normal controller maps positive output into 20–100% actual PWM, configured
 by `MOTOR_DUTY_OFFSET_PERCENT`: 50% controller output gives 60% PWM and 100%
-gives 100%. Zero output still stops. Telemetry reports actual PWM; the separate
+gives 100%. Zero driving output coasts. Telemetry reports driving PWM; braking
+reports zero drive even though the enables are held high. The separate
 calibration tool sends direct percentages without this offset.
-Throttle selects a target RPM; a PID loop uses the average of the two wheel
-speeds. Clutch handling is scaffolded but disabled: the motor starts and stays
+Partial throttle selects a target RPM up to the calibrated 317 RPM reference;
+a PID loop uses the average of the two wheel speeds. Exactly full throttle
+(32767) bypasses PID and commands 100% PWM for maximum available drive.
+Brake, invalid input, link loss, and motor/sensor faults still override full
+throttle. Actual maximum speed depends on voltage and load; 317 RPM is the
+wheel-up estimate from the recorded calibration, not a guaranteed loaded speed.
+With a healthy link and brake released, releasing the accelerator disables
+both bridge enables to coast and resets PID history. When partial-throttle
+PID requests zero drive, the bridge also coasts. Brake-pedal requests,
+invalid commands, link loss, and faults continue to apply active braking.
+Clutch handling is scaffolded but disabled: the motor starts and stays
 in forward direction. Once the Pi sends a real clutch value, a new press past
 its threshold can toggle direction only at zero throttle with both wheels stopped.
 
@@ -68,7 +78,13 @@ little-endian fields, byte 10 as a buttons placeholder (currently zero),
 sequence byte, and CRC-8. The Pi source documents pedal values as 0–32767,
 which this firmware now accepts. A reported released value of -32767 conflicts
 with that comment; such a reading is rejected until live Pi output resolves the
-range. Steering is decoded, but steering servo control is not implemented yet.
+range. Steering drives the LD-1501MG on D15/PB8 (TIM4_CH3), at 50 Hz:
+`-32767 -> 1000 us`, `0 -> 1500 us`, `32766 -> 2000 us`.
+The inclusive -500..500 dead zone holds 1500 us; the remaining input range
+is rescaled continuously to the endpoints (`STEER_DEAD_ZONE` in `src/config.h`).
+Each valid Pi command updates the pulse through the existing command thread.
+PWM starts disabled and is disabled on link loss or an invalid command.
+Swap `SERVO_LEFT_US` and `SERVO_RIGHT_US` in `src/config.h` if steering is reversed.
 Byte 10 is ignored for clutch until the Pi sender is extended.
 
 Edit [the motor settings](src/config.h) after checking actual pedal
@@ -98,12 +114,21 @@ hazards; a valid Pi command clears them. Four LED GPIO properties are left as
 placeholders in the board overlay, so no physical LEDs are driven yet. Pi button
 selection and steering self-cancel need the command mapping and turn threshold.
 See [TODO.md](TODO.md) for the missing hardware and Pi information.
-The [servo calibration placeholder](tools/servo_calibration/servo_calibration.py)
-does not generate a servo signal; it needs the servo model and linkage limits.
+The [servo calibration tool](tools/servo_calibration/servo_calibration.py)
+uses a separate firmware build with drive motors disabled. Build it with
+`-DSERVO_CALIBRATION=ON -DMOTOR_CALIBRATION=OFF` in a separate build directory.
+The manual tool defaults to 1400–1600 us; pass `--min-us 500 --max-us 2500`
+to allow the full pulse range. A 500–2500 us sweep has been commanded and
+acknowledged; physical steering direction and linkage clearance still need
+confirmation. The normal firmware now trials 1000–2000 us because steering
+reached its physical limit at about half the steering-wheel travel.
+Console output is buffered and drained by Zephyr’s logging thread at priority 5,
+below the control threads; a full log buffer drops messages instead of blocking control.
 
 ## Measure PWM versus wheel speed
 
-The normal firmware uses PID, so its PWM duty changes as it corrects speed.
+The normal firmware uses PID below full throttle, so its PWM duty changes as
+it corrects speed; full throttle commands 100% PWM directly.
 For an open-loop duty-versus-speed measurement, build the separate calibration
 firmware. Its C sources and laptop script live together in
 [`tools/motor_calibration/`](tools/motor_calibration/). CMake selects those test

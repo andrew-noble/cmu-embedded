@@ -69,6 +69,14 @@
  */
 #define STEER_RAW_MIN         -32767
 #define STEER_RAW_MAX          32766
+#define STEER_DEAD_ZONE          500 /* inclusive -500..500 commands center */
+/* LD-1501MG: negative steering -> LEFT, positive -> RIGHT.
+ * Swap LEFT/RIGHT pulse widths if the linkage direction is reversed. */
+#define SERVO_PULSE_MIN_US       500
+#define SERVO_PULSE_MAX_US      2500
+#define SERVO_LEFT_US          1000
+#define SERVO_CENTER_US        1500
+#define SERVO_RIGHT_US         2000
 #define THROTTLE_RAW_MIN           0
 #define THROTTLE_RAW_MAX       32767
 #define THROTTLE_RAW_REST          0
@@ -92,7 +100,10 @@
  * Zero still stops; calibration commands remain direct duty percentages. */
 #define MOTOR_DUTY_OFFSET_PERCENT 20
 
-#define MOTOR_MAX_RPM           120
+/* Wheel-up 100% PWM average, corrected from 3960 to 1316 counts/revolution:
+ * ((106.33 + 104.80) / 2) * 3960 / 1316 = approximately 317 RPM.
+ * Partial throttle uses PID; the exact full-pedal endpoint commands max PWM. */
+#define MOTOR_MAX_RPM           317
 #define MOTOR_SHIFT_MAX_RPM       5
 
 /* Output duty is a whole percent. PID corrections retain tenths of a percent

@@ -6,10 +6,10 @@
 
 #include "blinker.h"
 #include "config.h"
-#include "crc8.h"
+#include "crc8_checksum.h"
 #include "motor_control.h"
+#include "servo_driver.h"
 #include "status_tx.h"
-#include "testpoint.h"
 
 #define UART_DEVICE_NODE DT_NODELABEL(usart1)
 
@@ -72,6 +72,9 @@ static bool enter_error_state(void)
 	bool was_ok = atomic_clear(&link_ok) != 0;
 
 	motor_control_submit((struct motor_command){0});   /* valid = false: brake */
+	if (servo_driver_disable() != 0) {
+		printk("ERROR: could not disable steering PWM\n");
+	}
 	blinker_set_mode(BLINKER_HAZARD);
 	status_tx_set_zone_state(ZONE_STATE_ERROR);
 	return was_ok;
@@ -164,8 +167,6 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			continue;
 		}
 
-		testpoint_toggle(TP_CMD_RX);   /* an intact command was received */
-
 		struct motor_command command = {
 			.throttle = pi_cmd.throttle,
 			.brake = pi_cmd.brake,
@@ -175,11 +176,12 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 
 		/* Out-of-range values mean error state (R3). Short-circuit: a
 		 * command that failed parse_frame is never submitted. */
-		if (r == FRAME_OUT_OF_RANGE || !motor_control_submit(command)) {
+		if (r == FRAME_OUT_OF_RANGE || !motor_control_submit(command) ||
+		    servo_driver_set_steering(pi_cmd.steer) != 0) {
 			n_bad++;
 			k_timer_stop(&link_timer);   /* already failed; no LINK LOST later */
 			if (enter_error_state()) {
-				printk("ERROR: out-of-range command, fail-safe\n");
+				printk("ERROR: invalid command or steering output failure, fail-safe\n");
 			}
 			continue;
 		}
@@ -240,8 +242,9 @@ int main(void) {
 	/* Power-up is an error state until a valid Pi command arrives. */
 	blinker_set_mode(BLINKER_HAZARD);
 
-	if (testpoint_init() != 0) {
-		printk("Test point GPIO setup failed, check overlay\n");
+	if (servo_driver_init() != 0) {
+		printk("Steering PWM not ready, check overlay\n");
+		return 0;
 	}
 
 	if (!device_is_ready(uart_device)) {

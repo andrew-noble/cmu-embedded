@@ -7,7 +7,7 @@
 #include <zephyr/sys/util.h>
 
 #include "config.h"
-#include "crc8.h"
+#include "crc8_checksum.h"
 #include "status_tx.h"
 
 /* status_tx thread: every STATUS_PERIOD_MS, send the status frame built in

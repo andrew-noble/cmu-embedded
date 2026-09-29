@@ -4,7 +4,6 @@
 #include "encoder.h"
 #include "motor_control.h"
 #include "motor_driver.h"
-#include "testpoint.h"
 
 static struct k_spinlock motor_lock;
 static struct motor_command latest_command;
@@ -181,13 +180,23 @@ static void motor_thread(void *p1, void *p2, void *p3)
 		}
 
 		if (motor_fault || !sensors_healthy || !command.valid || brake_pressed ||
-		    throttle <= THROTTLE_ZERO_PERCENT) {
+		    !MOTOR_OUTPUTS_ENABLED) {
 			target_rpm = 0;
 			duty = 0;
 			integral_rpm_ms = 0;
 			previous_error = 0;
 			if (motor_driver_brake() != 0) {
 				motor_fault = true;
+			}
+		} else if (throttle <= THROTTLE_ZERO_PERCENT) {
+			/* Released accelerator: suspend PID and let the wheels coast. */
+			target_rpm = 0;
+			duty = 0;
+			integral_rpm_ms = 0;
+			previous_error = 0;
+			if (motor_driver_coast() != 0) {
+				motor_fault = true;
+				motor_driver_brake();
 			}
 		} else if (ticks > 0 || new_command) {
 			/* Both encoders contribute equally to the measured wheel speed. */
@@ -219,15 +228,22 @@ static void motor_thread(void *p1, void *p2, void *p3)
 				MOTOR_MAX_RPM + correction_tenths;
 
 			duty = clamp_duty(duty_tenths / 10);
+			if (command.throttle == THROTTLE_RAW_FULL) {
+				/* Full pedal requests maximum available drive, not a speed
+				 * ceiling. The brake/fault branch above always takes priority.
+				 * Clear PID history while bypassed so it cannot wind up. */
+				duty = MOTOR_MAX_DUTY_PERCENT;
+				integral_rpm_ms = 0;
+				previous_error = 0;
+			}
 			if (MOTOR_OUTPUTS_ENABLED && duty > 0) {
 				if (motor_driver_drive(reverse, duty) != 0) {
 					motor_fault = true;
 					motor_driver_brake();
-				} else if (new_command) {
-					/* PWM_SET: duty written for a new Pi command (R2.1 timing). */
-					testpoint_toggle(TP_PWM_SET);
 				}
-			} else {
+			} else if (motor_driver_coast() != 0) {
+				/* Zero PID drive coasts; an output failure still brakes. */
+				motor_fault = true;
 				motor_driver_brake();
 			}
 		}

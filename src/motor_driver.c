@@ -18,6 +18,16 @@ static const struct gpio_dt_spec right_in2 = GPIO_DT_SPEC_GET(MOTOR_NODE, right_
 static bool drive_active;
 static bool drive_reverse;
 
+int motor_driver_coast(void)
+{
+	/* EN low disables the bridge outputs, allowing the motor to freewheel. */
+	drive_active = false;
+	int rc = pwm_set_pulse_dt(&left_pwm, 0);
+
+	rc |= pwm_set_pulse_dt(&right_pwm, 0);
+	return rc;
+}
+
 int motor_driver_brake(void)
 {
 	/* EN high with both inputs equal gives dynamic braking. */
