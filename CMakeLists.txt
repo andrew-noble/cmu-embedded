@@ -26,5 +26,5 @@ elseif(MOTOR_CALIBRATION)
   target_sources(app PRIVATE src/encoder.c tools/motor_calibration/motor_calibration.c)
 else()
   target_sources(app PRIVATE src/encoder.c src/main.c src/motor_control.c src/blinker.c
-                             src/status_tx.c src/servo_driver.c)
+                             src/status_tx.c src/servo_driver.c src/wheel_buttons.c)
 endif()

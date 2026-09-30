@@ -5,10 +5,14 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
+#include <stdio.h>
 
 #include "config.h"
 #include "crc8_checksum.h"
 #include "status_tx.h"
+#include "motor_driver.h"
+#include "servo_driver.h"
+#include "blinker.h"
 
 /* status_tx thread: every STATUS_PERIOD_MS, send the status frame built in
  * the previous period, then sample the current sensors and build the next.
@@ -142,6 +146,39 @@ static void send_frame(const uint8_t f[FRAME_LEN])
 #endif
 }
 
+/* Reuse the ADC samples already collected for the Pi; no extra conversions.
+ * Driver snapshots describe commands/results, not physical position or pins. */
+static void print_usb_status(const uint8_t f[FRAME_LEN])
+{
+	char currents[3][12];
+	const unsigned offsets[] = { STATUS_POS_LEFT, STATUS_POS_RIGHT, STATUS_POS_SERVO };
+	for (unsigned i = 0; i < ARRAY_SIZE(offsets); i++) {
+		uint16_t mv = sys_get_le16(&f[offsets[i]]);
+		if (mv == STATUS_CURRENT_INVALID) {
+			snprintf(currents[i], sizeof(currents[i]), "INVALID");
+		} else {
+			snprintf(currents[i], sizeof(currents[i]), "%u", (unsigned)mv);
+		}
+	}
+
+	char pulse[24];
+	int32_t pulse_us = servo_driver_get_pulse();
+	if (pulse_us < 0) {
+		snprintf(pulse, sizeof(pulse), "UNKNOWN/FAULT");
+	} else if (pulse_us == 0) {
+		snprintf(pulse, sizeof(pulse), "OFF");
+	} else {
+		snprintf(pulse, sizeof(pulse), "%ldus", (long)pulse_us);
+	}
+
+	const char *motor_names[] = { "UNKNOWN", "COAST", "BRAKE", "DRIVE", "FAULT" };
+	const char *blinker_names[] = { "OFF", "LEFT", "RIGHT", "HAZARD" };
+	printk("STATUS state=%s | current_mV L=%s R=%s S=%s | servo=%s | motor=%s | blinker=%s\n",
+	       atomic_get(&zone_state) == ZONE_STATE_NORMAL ? "NORMAL" : "ERROR",
+	       currents[0], currents[1], currents[2], pulse,
+	       motor_names[motor_driver_get_state()], blinker_names[blinker_get_mode()]);
+}
+
 static void status_tx_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -150,6 +187,7 @@ static void status_tx_entry(void *p1, void *p2, void *p3)
 
 	uint8_t frame[FRAME_LEN];
 	uint8_t seq = 0;
+	int64_t last_usb_status_ms = 0;
 
 	adc_ok = adc_setup() == 0;
 	if (!adc_ok) {
@@ -164,6 +202,11 @@ static void status_tx_entry(void *p1, void *p2, void *p3)
 		k_timer_status_sync(&status_timer);
 		send_frame(frame);
 		build_frame(frame, seq++);
+		int64_t now = k_uptime_get();
+		if (now - last_usb_status_ms >= USB_STATUS_PERIOD_MS) {
+			last_usb_status_ms = now;
+			print_usb_status(frame);
+		}
 	}
 }
 

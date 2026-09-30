@@ -8,6 +8,7 @@
 # Locally recorded motor calibration runs
 /tools/motor_calibration/data/
 /tools/servo_calibration/data/
+/tools/telemetry/data/
 
 # Operating system metadata
 .DS_Store

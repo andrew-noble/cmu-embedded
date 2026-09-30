@@ -2,6 +2,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/sys/atomic.h>
 
 #include "config.h"
 #include "motor_driver.h"
@@ -17,6 +18,12 @@ static const struct gpio_dt_spec right_in2 = GPIO_DT_SPEC_GET(MOTOR_NODE, right_
 
 static bool drive_active;
 static bool drive_reverse;
+static atomic_t output_state = ATOMIC_INIT(MOTOR_OUTPUT_UNKNOWN);
+
+enum motor_output_state motor_driver_get_state(void)
+{
+	return (enum motor_output_state)atomic_get(&output_state);
+}
 
 int motor_driver_coast(void)
 {
@@ -25,6 +32,7 @@ int motor_driver_coast(void)
 	int rc = pwm_set_pulse_dt(&left_pwm, 0);
 
 	rc |= pwm_set_pulse_dt(&right_pwm, 0);
+	atomic_set(&output_state, rc == 0 ? MOTOR_OUTPUT_COAST : MOTOR_OUTPUT_FAULT);
 	return rc;
 }
 
@@ -39,6 +47,7 @@ int motor_driver_brake(void)
 	rc |= gpio_pin_set_dt(&right_in2, 0);
 	rc |= pwm_set_pulse_dt(&left_pwm, left_pwm.period);
 	rc |= pwm_set_pulse_dt(&right_pwm, right_pwm.period);
+	atomic_set(&output_state, rc == 0 ? MOTOR_OUTPUT_BRAKE : MOTOR_OUTPUT_FAULT);
 	return rc;
 }
 
@@ -63,6 +72,7 @@ int motor_driver_drive(bool reverse, int32_t duty_percent)
 		rc |= gpio_pin_set_dt(&right_in1, right_forward);
 		rc |= gpio_pin_set_dt(&right_in2, !right_forward);
 		if (rc != 0) {
+			atomic_set(&output_state, MOTOR_OUTPUT_FAULT);
 			return rc;
 		}
 	}
@@ -76,6 +86,7 @@ int motor_driver_drive(bool reverse, int32_t duty_percent)
 		drive_active = true;
 		drive_reverse = reverse;
 	}
+	atomic_set(&output_state, rc == 0 ? MOTOR_OUTPUT_DRIVE : MOTOR_OUTPUT_FAULT);
 	return rc;
 }
 

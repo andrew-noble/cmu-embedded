@@ -1,4 +1,5 @@
 #include <zephyr/kernel.h>
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/atomic.h>
@@ -10,11 +11,21 @@
 #include "motor_control.h"
 #include "servo_driver.h"
 #include "status_tx.h"
+#include "wheel_buttons.h"
 
 #define UART_DEVICE_NODE DT_NODELABEL(usart1)
 
 /* One-slot queue: the newest complete command frame from the UART ISR. */
-K_MSGQ_DEFINE(frame_queue, FRAME_LEN, UART_RX_QUEUE_DEPTH, UART_RX_QUEUE_ALIGNMENT);
+struct received_frame {
+	int64_t received_ms;
+	uint8_t data[FRAME_LEN];
+};
+K_MSGQ_DEFINE(frame_queue, sizeof(struct received_frame), UART_RX_QUEUE_DEPTH,
+	      UART_RX_QUEUE_ALIGNMENT);
+/* Serialize command outputs with fail-safe so timeout cannot be undone halfway
+ * through applying a command. Motor priority 0 can still preempt both paths. */
+K_MUTEX_DEFINE(command_lock);
+static int64_t link_deadline_ms;
 static const struct device *const uart_device = DEVICE_DT_GET(UART_DEVICE_NODE);
 
 /* True while valid commands are arriving. Set by cmd_handler; cleared by
@@ -49,8 +60,8 @@ enum {
 /* ---------------------------------------------------------------------------
  * Link watchdog (step 2)
  *
- * link_timer is a one-shot timer restarted by cmd_handler on every valid
- * command. If LINK_TIMEOUT_MS passes without one (three missed updates),
+ * link_timer is a one-shot timer scheduled from the reception timestamp of
+ * each valid command. If LINK_TIMEOUT_MS passes without one,
  * it expires and wakes fail_safe. The expiry function runs in interrupt
  * context, so it only gives a semaphore; fail_safe does the work.
  * ------------------------------------------------------------------------- */
@@ -146,11 +157,13 @@ static void get_uart_frame(const struct device *device, void *user_data) {
 		if (n == FRAME_LEN) {
 			/* Keep only the newest frame: drop one cmd_handler has not taken. */
 			if (k_msgq_num_free_get(&frame_queue) == 0) {
-				uint8_t discard[FRAME_LEN];
-				k_msgq_get(&frame_queue, discard, K_NO_WAIT);
+				struct received_frame discard;
+				k_msgq_get(&frame_queue, &discard, K_NO_WAIT);
 			}
 			/* Cannot fail: the slot is free and no thread runs inside an ISR. */
-			(void)k_msgq_put(&frame_queue, frame, K_NO_WAIT);
+			struct received_frame received = { .received_ms = k_uptime_get() };
+			memcpy(received.data, frame, FRAME_LEN);
+			(void)k_msgq_put(&frame_queue, &received, K_NO_WAIT);
 			n = 0;
 		}
 	}
@@ -186,16 +199,16 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 
 	int64_t last_print_ms = 0;
 	uint32_t n_valid = 0, n_bad = 0;
-	uint8_t buf[FRAME_LEN];
-	uint8_t held_buttons = 0;   /* buttons in the last in-range frame */
+	struct received_frame received;
+	struct wheel_buttons buttons = {0};
 	struct pi_command pi_cmd;
 
 	while (1) {
 		/* Sleep until the ISR delivers a frame. Link loss is detected by
 		 * link_timer, so no timeout is needed here. */
-		k_msgq_get(&frame_queue, buf, K_FOREVER);
+		k_msgq_get(&frame_queue, &received, K_FOREVER);
 
-		enum frame_result r = parse_frame(buf, &pi_cmd);
+		enum frame_result r = parse_frame(received.data, &pi_cmd);
 
 		if (r == FRAME_BAD_CRC) {
 			/* Corrupted on the wire: drop and count. A dead link is
@@ -204,15 +217,29 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			continue;
 		}
 
-		/* Button presses are 0 -> 1 changes between in-range frames. */
+		k_mutex_lock(&command_lock, K_FOREVER);
+		int64_t deadline_ms = received.received_ms + LINK_TIMEOUT_MS;
+		if (k_uptime_get() >= deadline_ms) {
+			/* An old queued frame must never restart the watchdog or outputs. */
+			n_bad++;
+			k_timer_stop(&link_timer);
+			enter_error_state();
+			k_mutex_unlock(&command_lock);
+			continue;
+		}
+		if (!atomic_get(&link_ok)) {
+			/* Do not combine self-test exit clicks across a lost link. */
+			self_test_press_ms = -1;
+		}
+
+		/* Debounced press edges for all three wheel buttons. */
 		uint8_t pressed = 0;
 		bool exited_self_test = false;
 
 		if (r == FRAME_OK) {
 			bool was_self_test = self_test;
 
-			pressed = pi_cmd.buttons & ~held_buttons;
-			held_buttons = pi_cmd.buttons;
+			pressed = wheel_buttons_update(&buttons, pi_cmd.buttons, received.received_ms);
 			update_self_test((pressed & BUTTON_SELF_TEST) != 0);
 			exited_self_test = was_self_test && !self_test;
 		}
@@ -235,11 +262,20 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			if (enter_error_state()) {
 				printk("ERROR: invalid command or steering output failure, fail-safe\n");
 			}
+			k_mutex_unlock(&command_lock);
 			continue;
 		}
 
-		/* Valid command: feed the link watchdog. */
-		k_timer_start(&link_timer, K_MSEC(LINK_TIMEOUT_MS), K_NO_WAIT);
+		/* Processing time must not extend the receive-to-fail-safe deadline. */
+		int64_t remaining_ms = deadline_ms - k_uptime_get();
+		if (remaining_ms <= 0) {
+			k_timer_stop(&link_timer);
+			enter_error_state();
+			k_mutex_unlock(&command_lock);
+			continue;
+		}
+		link_deadline_ms = deadline_ms;
+		k_timer_start(&link_timer, K_MSEC(remaining_ms), K_NO_WAIT);
 		n_valid++;
 
 		bool link_came_up = !atomic_set(&link_ok, 1);
@@ -255,6 +291,7 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			}
 			blinker_update_turn(pressed, pi_cmd.steer);
 		}
+		k_mutex_unlock(&command_lock);
 
 		if (n_valid % PRINT_EVERY == 0) {
 			printk("steer %6d  thr %6d  brk %6d  buttons %3u  seq %3u  bad %u\n",
@@ -277,8 +314,7 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 	}
 }
 
-/* fail_safe: runs only when link_timer expires (sporadic, at least 150 ms
- * apart). Must finish within 100 ms of the expiry; takes microseconds. */
+/* fail_safe: 95 ms reception timeout, with 5 ms budget for output response. */
 static void fail_safe_entry(void *p1, void *p2, void *p3) {
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -286,7 +322,14 @@ static void fail_safe_entry(void *p1, void *p2, void *p3) {
 
 	while (1) {
 		k_sem_take(&failsafe_sem, K_FOREVER);
-		if (enter_error_state()) {
+		k_mutex_lock(&command_lock, K_FOREVER);
+		/* A newer command may have renewed the deadline after the timer fired. */
+		bool lost = atomic_get(&link_ok) && k_uptime_get() >= link_deadline_ms;
+		if (lost) {
+			enter_error_state();
+		}
+		k_mutex_unlock(&command_lock);
+		if (lost) {
 			printk("LINK LOST (no valid command for %d ms)\n", LINK_TIMEOUT_MS);
 		}
 	}

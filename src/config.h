@@ -15,13 +15,14 @@
 #define CRC8_POLYNOMIAL         0x07
 #define CRC8_INITIAL            0x00
 #define UART_RX_QUEUE_DEPTH     1   /* frames, not bytes: keep only the newest */
-#define UART_RX_QUEUE_ALIGNMENT 1   /* FRAME_LEN (13) is odd, so alignment must be 1 */
-/* One-shot link watchdog, restarted on every valid command. The Pi sends at
- * least every 50 ms, so 150 ms = three consecutive missed updates (Part 2).
- * Fail-safe is entered within microseconds of expiry. */
-#define LINK_TIMEOUT_MS         150
+#define UART_RX_QUEUE_ALIGNMENT 4   /* queue contains frame plus reception timestamp */
+/* Follow the stricter 100 ms checkoff rather than Part 2's 150 ms timeout.
+ * Expire 95 ms after reception of the last valid command, leaving 5 ms for
+ * output response. The complete hardware response still needs measurement. */
+#define LINK_TIMEOUT_MS          95
 #define PRINT_EVERY             10  /* valid frames */
 #define MAIN_PRINT_PERIOD_MS    100
+#define USB_STATUS_PERIOD_MS    500 /* continuous summary, even with Pi link down */
 
 /* Encoder and motor scheduling. */
 #define ENC_PERIOD_MS           10
@@ -36,6 +37,7 @@
 #define BUTTON_LEFT             (1U << 1)   /* wheel button index 5 */
 #define BUTTON_RIGHT            (1U << 2)   /* wheel button index 4 */
 #define SELF_TEST_EXIT_WINDOW_MS 500
+#define BUTTON_DEBOUNCE_MS       30 /* stable release before another press */
 
 /* Blinker timing and thread. Half-periods give 1 Hz turns and 2 Hz hazards. */
 #define TURN_HALF_PERIOD_MS     500
@@ -58,7 +60,7 @@
 #define CMD_HANDLER_STACK_SIZE  2048
 #define STATUS_TX_STACK_SIZE    1024
 #define BLINKER_STACK_SIZE      1024
-#define CMD_HANDLER_START_DELAY_MS 10000
+#define CMD_HANDLER_START_DELAY_MS 0
 
 /* STM32-to-Pi status frame: same 13-byte layout as the command frame, with
  * ID 0x200. Data = three current-sensor readings (mV, uint16 LE), zone state,
@@ -115,8 +117,10 @@
 
 /* Wheel-up 100% PWM average, corrected from 3960 to 1316 counts/revolution:
  * ((106.33 + 104.80) / 2) * 3960 / 1316 = approximately 317 RPM.
- * Partial throttle uses PID; the exact full-pedal endpoint commands max PWM. */
-#define MOTOR_MAX_RPM           317
+ * This is the estimated unloaded hardware maximum, not the control target.
+ * Limit the requested speed to 200 RPM to leave headroom for load correction;
+ * PID remains active at full throttle and may command up to 100% PWM. */
+#define MOTOR_MAX_RPM           200
 #define MOTOR_SHIFT_MAX_RPM       5
 
 /* Output duty is a whole percent. PID corrections retain tenths of a percent

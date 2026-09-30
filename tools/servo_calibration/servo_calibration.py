@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Manually calibrate servo pulse widths using the separate servo firmware."""
 
+# Run from the repository root after flashing the servo calibration firmware:
+# source .venv/bin/activate
+# python -u tools/servo_calibration/servo_calibration.py --port /dev/ttyACM0 --arm
+# --arm commands the center position and enables manual servo movement.
+
 import argparse
 import json
 from pathlib import Path

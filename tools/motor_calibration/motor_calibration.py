@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Step open-loop motor PWM and record wheel RPM from calibration firmware."""
 
+# Run from the repository root after flashing the motor calibration firmware:
+# source .venv/bin/activate
+# python -u tools/motor_calibration/motor_calibration.py --port /dev/ttyACM0 --arm --steps 0,5,10
+# --arm permits motor movement; --steps selects the PWM duty percentages.
+
 import argparse
 import csv
 import math

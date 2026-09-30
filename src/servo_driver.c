@@ -1,11 +1,18 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/sys/atomic.h>
 
 #include "config.h"
 #include "servo_driver.h"
 
 static const struct pwm_dt_spec servo_pwm =
 	PWM_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), steering);
+static atomic_t last_pulse_us = ATOMIC_INIT(-1);
+
+int32_t servo_driver_get_pulse(void)
+{
+	return atomic_get(&last_pulse_us);
+}
 
 BUILD_ASSERT(SERVO_PULSE_MIN_US > 0 && SERVO_PULSE_MIN_US < SERVO_PULSE_MAX_US);
 BUILD_ASSERT(SERVO_CENTER_US >= SERVO_PULSE_MIN_US &&
@@ -18,7 +25,9 @@ BUILD_ASSERT(STEER_DEAD_ZONE >= 0 && STEER_DEAD_ZONE < STEER_RAW_MAX &&
 
 int servo_driver_disable(void)
 {
-	return pwm_set_pulse_dt(&servo_pwm, 0);
+	int rc = pwm_set_pulse_dt(&servo_pwm, 0);
+	atomic_set(&last_pulse_us, rc == 0 ? 0 : -1);
+	return rc;
 }
 
 int servo_driver_init(void)
@@ -34,7 +43,9 @@ int servo_driver_set_pulse(uint32_t pulse_us)
 	if (pulse_us < SERVO_PULSE_MIN_US || pulse_us > SERVO_PULSE_MAX_US) {
 		return -EINVAL;
 	}
-	return pwm_set_pulse_dt(&servo_pwm, PWM_USEC(pulse_us));
+	int rc = pwm_set_pulse_dt(&servo_pwm, PWM_USEC(pulse_us));
+	atomic_set(&last_pulse_us, rc == 0 ? (int32_t)pulse_us : -1);
+	return rc;
 }
 
 int servo_driver_set_steering(int16_t steering)

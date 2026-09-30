@@ -30,6 +30,14 @@ static uint32_t generation;
 static bool phase_on;
 static bool turn_seen;
 
+enum blinker_mode blinker_get_mode(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&state_lock);
+	enum blinker_mode mode = requested_mode;
+	k_spin_unlock(&state_lock, key);
+	return mode;
+}
+
 BUILD_ASSERT(BLINKER_TURN_THRESHOLD > STEER_DEAD_ZONE &&
 	     BLINKER_TURN_THRESHOLD <= STEER_RAW_MAX &&
 	     BLINKER_TURN_THRESHOLD <= -STEER_RAW_MIN);

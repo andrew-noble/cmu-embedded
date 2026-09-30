@@ -228,14 +228,6 @@ static void motor_thread(void *p1, void *p2, void *p3)
 				MOTOR_MAX_RPM + correction_tenths;
 
 			duty = clamp_duty(duty_tenths / 10);
-			if (command.throttle == THROTTLE_RAW_FULL) {
-				/* Full pedal requests maximum available drive, not a speed
-				 * ceiling. The brake/fault branch above always takes priority.
-				 * Clear PID history while bypassed so it cannot wind up. */
-				duty = MOTOR_MAX_DUTY_PERCENT;
-				integral_rpm_ms = 0;
-				previous_error = 0;
-			}
 			if (MOTOR_OUTPUTS_ENABLED && duty > 0) {
 				if (motor_driver_drive(reverse, duty) != 0) {
 					motor_fault = true;

@@ -58,14 +58,14 @@ by `MOTOR_DUTY_OFFSET_PERCENT`: 50% controller output gives 60% PWM and 100%
 gives 100%. Zero driving output coasts. Telemetry reports driving PWM; braking
 reports zero drive even though the enables are held high. The separate
 calibration tool sends direct percentages without this offset.
-Partial throttle selects a target RPM up to the calibrated 317 RPM reference;
-a PID loop uses the average of the two wheel speeds. Exactly full throttle
-(32767) bypasses PID and commands 100% PWM for maximum available drive.
-Brake, invalid input, link loss, and motor/sensor faults still override full
-throttle. Actual maximum speed depends on voltage and load; 317 RPM is the
-wheel-up estimate from the recorded calibration, not a guaranteed loaded speed.
+Throttle selects a target speed up to **200 RPM**, including at full pedal.
+PID uses the average of the two wheel speeds throughout the driving range and
+may use up to 100% PWM to correct speed under load. Brake, invalid input, link
+loss, and motor/sensor faults still override throttle. The estimated unloaded
+hardware maximum remains **317 RPM**, based on the recorded wheel-up calibration;
+it is not a guaranteed loaded speed. The lower target leaves control headroom.
 With a healthy link and brake released, releasing the accelerator disables
-both bridge enables to coast and resets PID history. When partial-throttle
+both bridge enables to coast and resets PID history. When
 PID requests zero drive, the bridge also coasts. Brake-pedal requests,
 invalid commands, link loss, and faults continue to apply active braking.
 Clutch handling is scaffolded but disabled: the motor starts and stays
@@ -104,14 +104,22 @@ motor direction before testing on the ground. The encoder counts-per-revolution 
 Wheel-up motor response and manual encoder counts were measured; see
 [the recorded measurements](tools/motor_calibration/MEASUREMENTS.md).
 Loaded behavior and the 2 ms timing requirement remain unverified.
-The link watchdog uses 95 ms plus a 5 ms receive wait to target the PDF's
-stricter 100 ms unplug checkoff; an earlier PDF paragraph says 150 ms.
+The link watchdog expires 95 ms after the last valid frame's reception, leaving
+5 ms for output response before the stricter 100 ms unplug checkoff. Part 2 of
+the handout instead says 150 ms; this firmware follows the checkoff. Expired
+queued frames are rejected, and the command handler starts without a 10-second
+delay. Command and fail-safe outputs are serialized so they cannot overwrite
+one another midway through an update. Hardware response timing still needs measurement.
 
 The blinker module uses a periodic Zephyr timer and a lower-priority thread,
 with no delay in the UART or motor path. It supports 1 Hz left/right turns and
 2 Hz hazards, both at 50% duty. Left LEDs use PC10/PC11; right LEDs use PC12/PD2.
 Pi byte 10 uses bits 0/1/2 for self-test/left/right button states; the command
-handler detects press edges. A left/right press toggles that side, or switches
+handler debounces all three buttons: presses act immediately; another press
+requires release observed across valid samples for at least 30 ms. At 50 ms
+packet intervals, allow two released samples between clicks. Self-test enters
+on one press and exits on two additional presses within 500 ms; bounce and
+held buttons do not count as additional clicks. A left/right press toggles that side, or switches
 from the other side. Automatic cancellation arms after steering in the selected
 direction beyond neutral by `BLINKER_TURN_MARGIN` (500 counts): left at -1000,
 right at +1000. It cancels on return to the ±500 neutral zone, including crossing
@@ -131,8 +139,8 @@ below the control threads; a full log buffer drops messages instead of blocking 
 
 ## Measure PWM versus wheel speed
 
-The normal firmware uses PID below full throttle, so its PWM duty changes as
-it corrects speed; full throttle commands 100% PWM directly.
+The normal firmware uses PID through full throttle (200 RPM target), so its
+PWM duty changes as it corrects speed.
 For an open-loop duty-versus-speed measurement, build the separate calibration
 firmware. Its C sources and laptop script live together in
 [`tools/motor_calibration/`](tools/motor_calibration/). CMake selects those test
@@ -246,3 +254,37 @@ USB rules are installed, and the Nucleo's ST-LINK/V2.1 was detected. The
 STM32CubeProgrammer CLI version command passed. This build now selects
 STM32CubeProgrammer as its default flash runner. Firmware has not been flashed
 or checked on the physical LED. Do not run West with sudo; use USB rules.
+
+## USB status monitor
+
+After flashing the normal firmware, close other serial tools and run:
+
+```bash
+source .venv/bin/activate
+python -m serial.tools.miniterm /dev/ttyACM0 115200
+```
+
+In addition to the existing motor and received-command lines, a `STATUS` line
+prints every `USB_STATUS_PERIOD_MS` (500 ms) even when Pi commands stop.
+It shows system state, three sensor voltages (`current_mV L/R/S`), commanded
+servo pulse, motor output mode, and requested blinker mode. Servo `OFF` means
+pulses disabled; `UNKNOWN/FAULT` means no confirmed pulse setting. ADC `INVALID`
+means a read/setup failure. Motor modes distinguish `BRAKE`, `COAST`, and `DRIVE`,
+with `UNKNOWN`/`FAULT` for unavailable/failed output state.
+
+Sensor voltages are not calibrated amperes. Output modes and servo pulse are
+software state, not measured electrical outputs or actual servo position.
+Snapshots from separate components can briefly differ during transitions.
+The existing Pi binary status packet remains unchanged, as does the `ENC` line
+consumed by `tools/telemetry/telemetry.py`. Exit miniterm with Ctrl+].
+
+For graphs and all status in one window, use the [telemetry dashboard](tools/telemetry/README.md)
+instead of miniterm:
+
+```bash
+source .venv/bin/activate
+python -u tools/telemetry/telemetry.py --port /dev/ttyACM0
+```
+
+This replaces the former `tools/motor_plot/` tool. Calibration tools remain
+separate because they actively command their dedicated calibration firmware.
