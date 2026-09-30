@@ -40,6 +40,9 @@
 /* Blinker timing and thread. Half-periods give 1 Hz turns and 2 Hz hazards. */
 #define TURN_HALF_PERIOD_MS     500
 #define HAZARD_HALF_PERIOD_MS   250
+/* Arm 500 counts beyond neutral; cancel on return to the dead zone. */
+#define BLINKER_TURN_MARGIN     500
+#define BLINKER_TURN_THRESHOLD (STEER_DEAD_ZONE + BLINKER_TURN_MARGIN)
 
 /* Thread priorities and stacks: the Part 4 task table.
  * Zephyr: lower number = higher priority; all are preemptive.

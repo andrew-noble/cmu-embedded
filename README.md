@@ -109,10 +109,14 @@ stricter 100 ms unplug checkoff; an earlier PDF paragraph says 150 ms.
 
 The blinker module uses a periodic Zephyr timer and a lower-priority thread,
 with no delay in the UART or motor path. It supports 1 Hz left/right turns and
-2 Hz hazards, both at 50% duty. Power-up, malformed input, and link loss select
-hazards; a valid Pi command clears them. Four LED GPIO properties are left as
-placeholders in the board overlay, so no physical LEDs are driven yet. Pi button
-selection and steering self-cancel need the command mapping and turn threshold.
+2 Hz hazards, both at 50% duty. Left LEDs use PC10/PC11; right LEDs use PC12/PD2.
+Pi byte 10 uses bits 0/1/2 for self-test/left/right button states; the command
+handler detects press edges. A left/right press toggles that side, or switches
+from the other side. Automatic cancellation arms after steering in the selected
+direction beyond neutral by `BLINKER_TURN_MARGIN` (500 counts): left at -1000,
+right at +1000. It cancels on return to the ±500 neutral zone, including crossing
+past it between frames. Selecting a signal while centered does not cancel it.
+Hazards override turn cancellation; changing modes clears the armed state.
 See [TODO.md](TODO.md) for the missing hardware and Pi information.
 The [servo calibration tool](tools/servo_calibration/servo_calibration.py)
 uses a separate firmware build with drive motors disabled. Build it with

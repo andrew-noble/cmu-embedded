@@ -91,7 +91,6 @@ static bool enter_error_state(void)
  * ------------------------------------------------------------------------- */
 static bool self_test;
 static int64_t self_test_press_ms;   /* last press while in self-test; -1 = none */
-static enum blinker_mode turn_mode = BLINKER_OFF;
 
 /* A press enters self-test. Once in, two presses within
  * SELF_TEST_EXIT_WINDOW_MS exit; the entering press does not count. */
@@ -115,26 +114,6 @@ static void update_self_test(bool pressed)
 	} else {
 		self_test_press_ms = now;
 	}
-}
-
-/* A left or right press toggles that side's front and rear LEDs; pressing the
- * other side switches over. Both pressed in the same frame is ignored. */
-static void update_turn(uint8_t pressed)
-{
-	enum blinker_mode side;
-
-	switch (pressed & (BUTTON_LEFT | BUTTON_RIGHT)) {
-	case BUTTON_LEFT:
-		side = BLINKER_LEFT;
-		break;
-	case BUTTON_RIGHT:
-		side = BLINKER_RIGHT;
-		break;
-	default:
-		return;
-	}
-	turn_mode = (turn_mode == side) ? BLINKER_OFF : side;
-	blinker_set_mode(turn_mode);
 }
 
 /* UART ISR callback: assemble 13-byte command frames and push each complete
@@ -271,11 +250,10 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 		if (!self_test) {
 			if (link_came_up || exited_self_test) {
 				/* Leaving the hazard state: start with no turn signal. */
-				turn_mode = BLINKER_OFF;
 				blinker_set_mode(BLINKER_OFF);
 				status_tx_set_zone_state(ZONE_STATE_NORMAL);
 			}
-			update_turn(pressed);
+			blinker_update_turn(pressed, pi_cmd.steer);
 		}
 
 		if (n_valid % PRINT_EVERY == 0) {

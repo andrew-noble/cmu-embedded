@@ -28,6 +28,11 @@ static struct k_spinlock state_lock;
 static enum blinker_mode requested_mode;
 static uint32_t generation;
 static bool phase_on;
+static bool turn_seen;
+
+BUILD_ASSERT(BLINKER_TURN_THRESHOLD > STEER_DEAD_ZONE &&
+	     BLINKER_TURN_THRESHOLD <= STEER_RAW_MAX &&
+	     BLINKER_TURN_THRESHOLD <= -STEER_RAW_MIN);
 K_SEM_DEFINE(blinker_wake, 0, 1);
 
 static void blinker_tick(struct k_timer *timer)
@@ -38,32 +43,72 @@ static void blinker_tick(struct k_timer *timer)
 
 K_TIMER_DEFINE(blinker_timer, blinker_tick, NULL);
 
+/* Caller holds state_lock so fail-safe hazards cannot be overwritten by
+ * a cancellation based on an older mode. Timer operations do not wait. */
+static void set_mode_locked(enum blinker_mode mode)
+{
+	if (requested_mode == mode) {
+		return;
+	}
+	requested_mode = mode;
+	turn_seen = false;
+	generation++;
+	phase_on = mode != BLINKER_OFF;
+	k_timer_stop(&blinker_timer);
+	if (mode != BLINKER_OFF) {
+		int32_t half_period = mode == BLINKER_HAZARD ?
+			HAZARD_HALF_PERIOD_MS : TURN_HALF_PERIOD_MS;
+		k_timer_start(&blinker_timer, K_MSEC(half_period), K_MSEC(half_period));
+	}
+	k_sem_give(&blinker_wake);
+}
+
 void blinker_set_mode(enum blinker_mode mode)
 {
 	if (mode < BLINKER_OFF || mode > BLINKER_HAZARD) {
 		return;
 	}
+	k_spinlock_key_t key = k_spin_lock(&state_lock);
+	set_mode_locked(mode);
+	k_spin_unlock(&state_lock, key);
+}
 
+void blinker_update_turn(uint8_t pressed, int16_t steering)
+{
 	k_spinlock_key_t key = k_spin_lock(&state_lock);
 
-	if (requested_mode == mode) {
+	/* Hazards belong to self-test/fail-safe, never to steering cancellation. */
+	if (requested_mode == BLINKER_HAZARD) {
 		k_spin_unlock(&state_lock, key);
 		return;
 	}
-	requested_mode = mode;
-	generation++;
-	phase_on = mode != BLINKER_OFF;
-	k_spin_unlock(&state_lock, key);
-
-	k_timer_stop(&blinker_timer);
-	if (mode != BLINKER_OFF) {
-		int32_t half_period = mode == BLINKER_HAZARD ?
-			HAZARD_HALF_PERIOD_MS : TURN_HALF_PERIOD_MS;
-
-		k_timer_start(&blinker_timer, K_MSEC(half_period),
-			      K_MSEC(half_period));
+	switch (pressed & (BUTTON_LEFT | BUTTON_RIGHT)) {
+	case BUTTON_LEFT:
+		set_mode_locked(requested_mode == BLINKER_LEFT ? BLINKER_OFF : BLINKER_LEFT);
+		break;
+	case BUTTON_RIGHT:
+		set_mode_locked(requested_mode == BLINKER_RIGHT ? BLINKER_OFF : BLINKER_RIGHT);
+		break;
+	default:
+		break; /* simultaneous presses do not change the selected side */
 	}
-	k_sem_give(&blinker_wake);
+
+	/* Negative input is left. First observe a turn in the selected direction,
+	 * then cancel upon reaching or crossing neutral (including skipped samples). */
+	if (requested_mode == BLINKER_LEFT) {
+		if (steering <= -BLINKER_TURN_THRESHOLD) {
+			turn_seen = true;
+		} else if (turn_seen && steering >= -STEER_DEAD_ZONE) {
+			set_mode_locked(BLINKER_OFF);
+		}
+	} else if (requested_mode == BLINKER_RIGHT) {
+		if (steering >= BLINKER_TURN_THRESHOLD) {
+			turn_seen = true;
+		} else if (turn_seen && steering <= STEER_DEAD_ZONE) {
+			set_mode_locked(BLINKER_OFF);
+		}
+	}
+	k_spin_unlock(&state_lock, key);
 }
 
 static int configure_pins(void)
