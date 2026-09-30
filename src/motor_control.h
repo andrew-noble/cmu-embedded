@@ -18,6 +18,8 @@ struct motor_telemetry {
 	int32_t right_rpm;
 	int32_t target_rpm;
 	int32_t duty_percent;
+	int32_t left_duty_percent;
+	int32_t right_duty_percent;
 	bool reverse;
 };
 

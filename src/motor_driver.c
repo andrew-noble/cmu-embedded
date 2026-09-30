@@ -53,6 +53,13 @@ int motor_driver_brake(void)
 
 int motor_driver_drive(bool reverse, int32_t duty_percent)
 {
+	return motor_driver_drive_wheels(reverse, duty_percent, duty_percent);
+}
+
+int motor_driver_drive_wheels(bool reverse, int32_t left_duty, int32_t right_duty)
+{
+	left_duty = CLAMP(left_duty, 0, 100);
+	right_duty = CLAMP(right_duty, 0, 100);
 	int left_forward = LEFT_FORWARD_IN1_HIGH;
 	int right_forward = RIGHT_FORWARD_IN1_HIGH;
 
@@ -77,8 +84,8 @@ int motor_driver_drive(bool reverse, int32_t duty_percent)
 		}
 	}
 
-	uint32_t left_pulse = (uint32_t)((uint64_t)left_pwm.period * duty_percent / 100);
-	uint32_t right_pulse = (uint32_t)((uint64_t)right_pwm.period * duty_percent / 100);
+	uint32_t left_pulse = (uint32_t)((uint64_t)left_pwm.period * left_duty / 100);
+	uint32_t right_pulse = (uint32_t)((uint64_t)right_pwm.period * right_duty / 100);
 
 	rc = pwm_set_pulse_dt(&left_pwm, left_pulse);
 	rc |= pwm_set_pulse_dt(&right_pwm, right_pulse);

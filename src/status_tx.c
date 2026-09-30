@@ -43,6 +43,8 @@ enum {
 
 static atomic_t zone_state = ATOMIC_INIT(ZONE_STATE_ERROR);  /* power-up is an error state */
 static bool adc_ok;
+BUILD_ASSERT(CURRENT_LEFT_MV_PER_AMP > 0 && CURRENT_RIGHT_MV_PER_AMP > 0 &&
+	     CURRENT_SERVO_MV_PER_AMP > 0);
 
 #if STATUS_TX_ENABLED
 static const struct device *const status_uart = DEVICE_DT_GET(DT_NODELABEL(usart1));
@@ -89,6 +91,8 @@ static int read_current_mv(const struct adc_dt_spec *spec, uint16_t *mv_out)
 		if (rc < 0) {
 			return rc;
 		}
+		/* Keep full-scale samples: reported voltage/current plateaus at
+		 * the ADC ceiling; no extrapolation or range rescaling. */
 		sum += raw;
 	}
 
@@ -151,13 +155,21 @@ static void send_frame(const uint8_t f[FRAME_LEN])
 static void print_usb_status(const uint8_t f[FRAME_LEN])
 {
 	char currents[3][12];
+	char milliamps[3][12];
+	const int32_t zero_mv[] = { CURRENT_LEFT_ZERO_MV, CURRENT_RIGHT_ZERO_MV,
+		CURRENT_SERVO_ZERO_MV };
+	const int32_t mv_per_amp[] = { CURRENT_LEFT_MV_PER_AMP, CURRENT_RIGHT_MV_PER_AMP,
+		CURRENT_SERVO_MV_PER_AMP };
 	const unsigned offsets[] = { STATUS_POS_LEFT, STATUS_POS_RIGHT, STATUS_POS_SERVO };
 	for (unsigned i = 0; i < ARRAY_SIZE(offsets); i++) {
 		uint16_t mv = sys_get_le16(&f[offsets[i]]);
 		if (mv == STATUS_CURRENT_INVALID) {
 			snprintf(currents[i], sizeof(currents[i]), "INVALID");
+			snprintf(milliamps[i], sizeof(milliamps[i]), "INVALID");
 		} else {
 			snprintf(currents[i], sizeof(currents[i]), "%u", (unsigned)mv);
+			int32_t ma = ((int32_t)mv - zero_mv[i]) * 1000 / mv_per_amp[i];
+			snprintf(milliamps[i], sizeof(milliamps[i]), "%ld", (long)ma);
 		}
 	}
 
@@ -173,10 +185,12 @@ static void print_usb_status(const uint8_t f[FRAME_LEN])
 
 	const char *motor_names[] = { "UNKNOWN", "COAST", "BRAKE", "DRIVE", "FAULT" };
 	const char *blinker_names[] = { "OFF", "LEFT", "RIGHT", "HAZARD" };
-	printk("STATUS state=%s | current_mV L=%s R=%s S=%s | servo=%s | motor=%s | blinker=%s\n",
+	printk("STATUS state=%s | current_mV L=%s R=%s S=%s | servo=%s | motor=%s | blinker=%s"
+	       " | current_mA L=%s R=%s S=%s\n",
 	       atomic_get(&zone_state) == ZONE_STATE_NORMAL ? "NORMAL" : "ERROR",
 	       currents[0], currents[1], currents[2], pulse,
-	       motor_names[motor_driver_get_state()], blinker_names[blinker_get_mode()]);
+	       motor_names[motor_driver_get_state()], blinker_names[blinker_get_mode()],
+	       milliamps[0], milliamps[1], milliamps[2]);
 }
 
 static void status_tx_entry(void *p1, void *p2, void *p3)

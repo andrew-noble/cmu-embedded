@@ -59,8 +59,33 @@ gives 100%. Zero driving output coasts. Telemetry reports driving PWM; braking
 reports zero drive even though the enables are held high. The separate
 calibration tool sends direct percentages without this offset.
 Throttle selects a target speed up to **200 RPM**, including at full pedal.
-PID uses the average of the two wheel speeds throughout the driving range and
-may use up to 100% PWM to correct speed under load. Brake, invalid input, link
+Operational input clamps are independently configurable in `src/config.h`:
+`STEER_CLAMP_MIN/MAX`, `THROTTLE_CLAMP_MIN/MAX`, and `BRAKE_CLAMP_MIN/MAX`.
+They default to the full valid ranges. Narrow these limits without changing
+the `RAW_*` calibration values. For example, `THROTTLE_CLAMP_MAX 10000` caps
+the input on the original 0–32767 scale (62 RPM with the existing integer
+percentage rounding), not at the full 200 RPM target. Rebuild and flash after
+editing limits. `CLAMP:` telemetry events show the received value, applied
+value, and allowed range, repeated at most every `INPUT_CLAMP_REPORT_MS` while
+the same fields remain clamped. The command summary retains raw received values.
+Brake clamping acts before the brake threshold, so a maximum below
+`BRAKE_PRESSED_AT` prevents that input from requesting braking. Buttons remain
+bit flags and clutch is not yet carried by the Pi command packet.
+Protocol-invalid commands still trigger error handling; operational clamping
+does not demonstrate the assignment's separate malformed/out-of-range rejection.
+Each wheel has its own PID state and encoder feedback, sharing the requested RPM.
+Motor effort comes only from PID; feedforward has been removed. The separate
+20% positive-duty offset remains in place.
+A moving wheel can no longer mask a stationary wheel through averaging. Candidate
+gains are Kp=0.45, Ki=0.60, Kd=0.020, configured in thousandths of effort-percent in
+`src/config.h`. Derivative acts on measured speed with a 50 ms filter, avoiding
+target-change kicks. The integral storage bound scales with Ki and permits full
+effort. Accumulation stops once the output is already saturated in the error's
+direction, while opposite error can unwind it. Sustained positive speed error
+can therefore raise each output to 100% PWM instead of stopping prematurely.
+Telemetry includes `pwm L=... R=...`; the older `duty` field now reports their
+integer mean. These gains require another physical step-response test.
+Brake, invalid input, link
 loss, and motor/sensor faults still override throttle. The estimated unloaded
 hardware maximum remains **317 RPM**, based on the recorded wheel-up calibration;
 it is not a guaranteed loaded speed. The lower target leaves control headroom.
@@ -104,9 +129,15 @@ motor direction before testing on the ground. The encoder counts-per-revolution 
 Wheel-up motor response and manual encoder counts were measured; see
 [the recorded measurements](tools/motor_calibration/MEASUREMENTS.md).
 Loaded behavior and the 2 ms timing requirement remain unverified.
-The link watchdog expires 95 ms after the last valid frame's reception, leaving
-5 ms for output response before the stricter 100 ms unplug checkoff. Part 2 of
-the handout instead says 150 ms; this firmware follows the checkoff. Expired
+The link watchdog uses the requested testing policy: one miss per 150 ms without
+a valid command, with three consecutive misses triggering fail-safe at 450 ms.
+The counter saturates at three and a new valid command restarts counting from
+its reception time. Timer wakes are checked against elapsed time so delayed or
+stale wakes cannot overcount. Fail-safe runs immediately at the threshold; the
+additional 100 ms response budget is not an intentional delay and still needs
+hardware verification (550 ms maximum from last valid reception). This exceeds
+Part 2's 150 ms timeout and the literal 100 ms unplug checkoff; clarify the
+requirement and restore checkoff timing before assessment. Expired
 queued frames are rejected, and the command handler starts without a 10-second
 delay. Command and fail-safe outputs are serialized so they cannot overwrite
 one another midway through an update. Hardware response timing still needs measurement.
@@ -272,7 +303,12 @@ pulses disabled; `UNKNOWN/FAULT` means no confirmed pulse setting. ADC `INVALID`
 means a read/setup failure. Motor modes distinguish `BRAKE`, `COAST`, and `DRIVE`,
 with `UNKNOWN`/`FAULT` for unavailable/failed output state.
 
-Sensor voltages are not calibrated amperes. Output modes and servo pulse are
+The `current_mA L/R/S` fields use nominal ACS712-05B conversion:
+`(mV - 2500) * 1000 / 185`. Per-channel offsets and sensitivity are in
+`src/config.h`; measured zero offsets are still needed. Saturated ADC samples
+remain numeric and plateau near +4.32 A at a nominal 3.3 V ADC ceiling, without
+rescaling to 5 A. This does not extend the ADC input-voltage range.
+Output modes and servo pulse are
 software state, not measured electrical outputs or actual servo position.
 Snapshots from separate components can briefly differ during transitions.
 The existing Pi binary status packet remains unchanged, as does the `ENC` line

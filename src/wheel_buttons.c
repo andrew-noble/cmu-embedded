@@ -16,6 +16,13 @@ uint8_t wheel_buttons_update(struct wheel_buttons *state, uint8_t raw, int64_t n
 			button->releasing = false;
 		}
 		if (raw & masks[i]) {
+			/* A new press can itself finish the observed release interval.
+			 * Requiring a second released packet loses fast double clicks at
+			 * the Pi's 50 ms sampling interval. A long link gap cannot rearm. */
+			if (button->releasing &&
+			    now_ms - button->release_since_ms >= BUTTON_DEBOUNCE_MS) {
+				button->held = false;
+			}
 			button->releasing = false;
 			if (!button->held) {
 				button->held = true;

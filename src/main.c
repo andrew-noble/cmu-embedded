@@ -26,6 +26,17 @@ K_MSGQ_DEFINE(frame_queue, sizeof(struct received_frame), UART_RX_QUEUE_DEPTH,
  * through applying a command. Motor priority 0 can still preempt both paths. */
 K_MUTEX_DEFINE(command_lock);
 static int64_t link_deadline_ms;
+static uint8_t link_miss_count; /* 0..LINK_MISS_LIMIT; guarded by command_lock */
+BUILD_ASSERT(LINK_MISS_INTERVAL_MS > 0);
+BUILD_ASSERT(LINK_MISS_LIMIT > 0 && LINK_MISS_LIMIT <= UINT8_MAX);
+
+/* Count elapsed intervals, not semaphore wakes: wakes may coalesce or belong
+ * to an earlier command. Clamp before narrowing so the counter never wraps. */
+static uint8_t link_misses_at(int64_t now_ms, int64_t deadline_ms)
+{
+	int64_t elapsed = now_ms - (deadline_ms - LINK_TIMEOUT_MS);
+	return (uint8_t)CLAMP(elapsed / LINK_MISS_INTERVAL_MS, 0, LINK_MISS_LIMIT);
+}
 static const struct device *const uart_device = DEVICE_DT_GET(UART_DEVICE_NODE);
 
 /* True while valid commands are arriving. Set by cmd_handler; cleared by
@@ -47,6 +58,46 @@ enum frame_result {
 	FRAME_OUT_OF_RANGE,
 };
 
+#define CHECK_INPUT_CLAMP(name) \
+	BUILD_ASSERT(name##_CLAMP_MIN >= name##_RAW_MIN && \
+		     name##_CLAMP_MAX <= name##_RAW_MAX && \
+		     name##_CLAMP_MIN <= name##_CLAMP_MAX)
+CHECK_INPUT_CLAMP(STEER);
+CHECK_INPUT_CLAMP(THROTTLE);
+CHECK_INPUT_CLAMP(BRAKE);
+BUILD_ASSERT(THROTTLE_CLAMP_MIN <= THROTTLE_RAW_REST &&
+	     THROTTLE_CLAMP_MAX >= THROTTLE_RAW_REST,
+	     "Throttle clamp must include released pedal; otherwise release commands drive");
+BUILD_ASSERT(INPUT_CLAMP_REPORT_MS > 0);
+
+static uint8_t clamp_inputs(struct pi_command *command)
+{
+	struct pi_command raw = *command;
+	command->steer = CLAMP(raw.steer, STEER_CLAMP_MIN, STEER_CLAMP_MAX);
+	command->throttle = CLAMP(raw.throttle, THROTTLE_CLAMP_MIN, THROTTLE_CLAMP_MAX);
+	command->brake = CLAMP(raw.brake, BRAKE_CLAMP_MIN, BRAKE_CLAMP_MAX);
+	return (raw.steer != command->steer ? 1 : 0) |
+	       (raw.throttle != command->throttle ? 2 : 0) |
+	       (raw.brake != command->brake ? 4 : 0);
+}
+
+static void report_input_clamps(const struct pi_command *raw,
+				const struct pi_command *applied, uint8_t mask)
+{
+	if (mask & 1) {
+		printk("CLAMP: steering out of range: received=%d applied=%d allowed=[%d,%d]\n",
+		       raw->steer, applied->steer, STEER_CLAMP_MIN, STEER_CLAMP_MAX);
+	}
+	if (mask & 2) {
+		printk("CLAMP: throttle out of range: received=%d applied=%d allowed=[%d,%d]\n",
+		       raw->throttle, applied->throttle, THROTTLE_CLAMP_MIN, THROTTLE_CLAMP_MAX);
+	}
+	if (mask & 4) {
+		printk("CLAMP: brake out of range: received=%d applied=%d allowed=[%d,%d]\n",
+		       raw->brake, applied->brake, BRAKE_CLAMP_MIN, BRAKE_CLAMP_MAX);
+	}
+}
+
 /* Byte positions after the 4-byte header (SOF, ID_HI, ID_LO, DLC). */
 enum {
 	POS_STEER = 4,
@@ -60,9 +111,9 @@ enum {
 /* ---------------------------------------------------------------------------
  * Link watchdog (step 2)
  *
- * link_timer is a one-shot timer scheduled from the reception timestamp of
- * each valid command. If LINK_TIMEOUT_MS passes without one,
- * it expires and wakes fail_safe. The expiry function runs in interrupt
+ * link_timer checks each missed interval from the reception timestamp of
+ * each valid command. LINK_MISS_LIMIT consecutive misses trigger fail-safe.
+ * The expiry function runs in interrupt
  * context, so it only gives a semaphore; fail_safe does the work.
  * ------------------------------------------------------------------------- */
 K_SEM_DEFINE(failsafe_sem, 0, 1);
@@ -92,6 +143,7 @@ static void apply_hazard_outputs(void)
 static bool enter_error_state(void)
 {
 	bool was_ok = atomic_clear(&link_ok) != 0;
+	k_timer_stop(&link_timer);
 
 	apply_hazard_outputs();
 	return was_ok;
@@ -198,6 +250,8 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 	ARG_UNUSED(p3);
 
 	int64_t last_print_ms = 0;
+	int64_t last_clamp_report_ms = 0;
+	uint8_t previous_clamp_mask = 0;
 	uint32_t n_valid = 0, n_bad = 0;
 	struct received_frame received;
 	struct wheel_buttons buttons = {0};
@@ -216,6 +270,9 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			n_bad++;
 			continue;
 		}
+		/* Reject protocol-invalid values before any operational clamping. */
+		struct pi_command raw_command = pi_cmd;
+		uint8_t clamp_mask = r == FRAME_OK ? clamp_inputs(&pi_cmd) : 0;
 
 		k_mutex_lock(&command_lock, K_FOREVER);
 		int64_t deadline_ms = received.received_ms + LINK_TIMEOUT_MS;
@@ -267,7 +324,8 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 		}
 
 		/* Processing time must not extend the receive-to-fail-safe deadline. */
-		int64_t remaining_ms = deadline_ms - k_uptime_get();
+		int64_t now_ms = k_uptime_get();
+		int64_t remaining_ms = deadline_ms - now_ms;
 		if (remaining_ms <= 0) {
 			k_timer_stop(&link_timer);
 			enter_error_state();
@@ -275,7 +333,12 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			continue;
 		}
 		link_deadline_ms = deadline_ms;
-		k_timer_start(&link_timer, K_MSEC(remaining_ms), K_NO_WAIT);
+		/* A fresh command resets the counter. Account for any intervals that
+		 * elapsed during processing and align the next tick to reception. */
+		link_miss_count = link_misses_at(now_ms, deadline_ms);
+		int64_t next_tick_ms = LINK_MISS_INTERVAL_MS -
+			(now_ms - received.received_ms) % LINK_MISS_INTERVAL_MS;
+		k_timer_start(&link_timer, K_MSEC(next_tick_ms), K_MSEC(LINK_MISS_INTERVAL_MS));
 		n_valid++;
 
 		bool link_came_up = !atomic_set(&link_ok, 1);
@@ -293,9 +356,28 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 		}
 		k_mutex_unlock(&command_lock);
 
+		/* Report after applying outputs and outside the command mutex. */
+		int64_t report_ms = k_uptime_get();
+		uint8_t cleared_mask = previous_clamp_mask & ~clamp_mask;
+		if (cleared_mask & 1) {
+			printk("CLAMP: steering back in range; clamp cleared\n");
+		}
+		if (cleared_mask & 2) {
+			printk("CLAMP: throttle back in range; clamp cleared\n");
+		}
+		if (cleared_mask & 4) {
+			printk("CLAMP: brake back in range; clamp cleared\n");
+		}
+		if (clamp_mask && (clamp_mask != previous_clamp_mask ||
+		    report_ms - last_clamp_report_ms >= INPUT_CLAMP_REPORT_MS)) {
+			report_input_clamps(&raw_command, &pi_cmd, clamp_mask);
+			last_clamp_report_ms = report_ms;
+		}
+		previous_clamp_mask = clamp_mask;
+
 		if (n_valid % PRINT_EVERY == 0) {
 			printk("steer %6d  thr %6d  brk %6d  buttons %3u  seq %3u  bad %u\n",
-			       pi_cmd.steer, pi_cmd.throttle, pi_cmd.brake,
+			       raw_command.steer, raw_command.throttle, raw_command.brake,
 			       (unsigned)pi_cmd.buttons, (unsigned)pi_cmd.seq,
 			       (unsigned)n_bad);
 		}
@@ -305,16 +387,18 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 
 			motor_control_get_telemetry(&telemetry);
 			last_print_ms = k_uptime_get();
-			printk("ENC L %8d %5d rpm | R %8d %5d rpm | target %3d duty %3d%% %s\n",
+			printk("ENC L %8d %5d rpm | R %8d %5d rpm | target %3d duty %3d%% %s"
+			       " | pwm L=%d R=%d\n",
 			       (int)telemetry.left_position, (int)telemetry.left_rpm,
 			       (int)telemetry.right_position, (int)telemetry.right_rpm,
 			       (int)telemetry.target_rpm, (int)telemetry.duty_percent,
-			       telemetry.reverse ? "REV" : "FWD");
+			       telemetry.reverse ? "REV" : "FWD",
+			       (int)telemetry.left_duty_percent, (int)telemetry.right_duty_percent);
 		}
 	}
 }
 
-/* fail_safe: 95 ms reception timeout, with 5 ms budget for output response. */
+/* fail_safe: reception timeout configured by LINK_TIMEOUT_MS. */
 static void fail_safe_entry(void *p1, void *p2, void *p3) {
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -324,13 +408,18 @@ static void fail_safe_entry(void *p1, void *p2, void *p3) {
 		k_sem_take(&failsafe_sem, K_FOREVER);
 		k_mutex_lock(&command_lock, K_FOREVER);
 		/* A newer command may have renewed the deadline after the timer fired. */
-		bool lost = atomic_get(&link_ok) && k_uptime_get() >= link_deadline_ms;
+		bool lost = false;
+		if (atomic_get(&link_ok)) {
+			link_miss_count = link_misses_at(k_uptime_get(), link_deadline_ms);
+			lost = link_miss_count == LINK_MISS_LIMIT;
+		}
 		if (lost) {
 			enter_error_state();
 		}
 		k_mutex_unlock(&command_lock);
 		if (lost) {
-			printk("LINK LOST (no valid command for %d ms)\n", LINK_TIMEOUT_MS);
+			printk("LINK LOST (%d consecutive %d ms misses; %d ms total)\n",
+			       LINK_MISS_LIMIT, LINK_MISS_INTERVAL_MS, LINK_TIMEOUT_MS);
 		}
 	}
 }

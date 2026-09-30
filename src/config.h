@@ -16,17 +16,23 @@
 #define CRC8_INITIAL            0x00
 #define UART_RX_QUEUE_DEPTH     1   /* frames, not bytes: keep only the newest */
 #define UART_RX_QUEUE_ALIGNMENT 4   /* queue contains frame plus reception timestamp */
-/* Follow the stricter 100 ms checkoff rather than Part 2's 150 ms timeout.
- * Expire 95 ms after reception of the last valid command, leaving 5 ms for
- * output response. The complete hardware response still needs measurement. */
-#define LINK_TIMEOUT_MS          95
+/* Requested test policy: three consecutive 150 ms misses, then fail-safe.
+ * This is not the handout's literal 100 ms cable-unplug checkoff timing. */
+#define LINK_MISS_INTERVAL_MS    150
+#define LINK_MISS_LIMIT          3
+#define LINK_TIMEOUT_MS          (LINK_MISS_INTERVAL_MS * LINK_MISS_LIMIT)
+#define LINK_FAILSAFE_RESPONSE_BUDGET_MS 100 /* measurement budget, not a delay */
 #define PRINT_EVERY             10  /* valid frames */
 #define MAIN_PRINT_PERIOD_MS    100
 #define USB_STATUS_PERIOD_MS    500 /* continuous summary, even with Pi link down */
 
 /* Encoder and motor scheduling. */
 #define ENC_PERIOD_MS           10
-#define MOTOR_INTEGRAL_LIMIT_RPM_MS 500000LL
+/* Allow the integral alone to reach full effort; keep its storage bounded.
+ * Derive the bound from Ki so lowering Ki cannot silently lower max PWM. */
+#define MOTOR_INTEGRAL_LIMIT_RPM_MS \
+	(MOTOR_MAX_DUTY_PERCENT * 1000000LL / \
+	 (MOTOR_KI_MILLI_PERCENT_PER_RPM_S > 0 ? MOTOR_KI_MILLI_PERCENT_PER_RPM_S : 1))
 
 /* Pi byte 10 button bits from the steering wheel, 1 while held. Byte 10 has
  * only 8 bits, so the Pi packs wheel button indices 10/5/4 into bits 0/1/2.
@@ -37,7 +43,7 @@
 #define BUTTON_LEFT             (1U << 1)   /* wheel button index 5 */
 #define BUTTON_RIGHT            (1U << 2)   /* wheel button index 4 */
 #define SELF_TEST_EXIT_WINDOW_MS 500
-#define BUTTON_DEBOUNCE_MS       30 /* stable release before another press */
+#define BUTTON_DEBOUNCE_MS       30 /* observed release interval before another press */
 
 /* Blinker timing and thread. Half-periods give 1 Hz turns and 2 Hz hazards. */
 #define TURN_HALF_PERIOD_MS     500
@@ -71,6 +77,15 @@
 #define STATUS_DLC              8
 #define STATUS_ADC_SAMPLES      8   /* averaged per channel per frame */
 #define STATUS_CURRENT_INVALID  0xFFFF
+/* Nominal ACS712-05B, 5 V supply, direct output (no divider).
+ * Assumes all three channels use this variant. Replace zero offsets with
+ * measured no-current voltages; these constants do not change ADC limits. */
+#define CURRENT_LEFT_ZERO_MV       2500
+#define CURRENT_RIGHT_ZERO_MV      2500
+#define CURRENT_SERVO_ZERO_MV      2500
+#define CURRENT_LEFT_MV_PER_AMP     185
+#define CURRENT_RIGHT_MV_PER_AMP    185
+#define CURRENT_SERVO_MV_PER_AMP    185
 /* 0 until USART1 has a TX pin: PB6 drives right motor IN3 and PA9 is the
  * right encoder. While 0, frames are built but not sent, and readings are
  * printed once per STATUS_PRINT_EVERY frames instead. */
@@ -108,6 +123,18 @@
 #define CLUTCH_PRESSED_HIGH       1   /* use 0 if values fall when pressed */
 #define CLUTCH_CONTROL_ENABLED    0   /* forward only until Pi sends clutch */
 
+/* Operational input clamps, independent of RAW validity/calibration ranges.
+ * Example: THROTTLE_CLAMP_MAX=10000 limits the target on the ORIGINAL scale.
+ * Clamped commands remain valid; telemetry reports the received/applied values.
+ * Brake clamping also changes what reaches BRAKE_PRESSED_AT. */
+#define STEER_CLAMP_MIN          STEER_RAW_MIN
+#define STEER_CLAMP_MAX          STEER_RAW_MAX
+#define THROTTLE_CLAMP_MIN       THROTTLE_RAW_MIN /* must include released pedal */
+#define THROTTLE_CLAMP_MAX       THROTTLE_RAW_MAX 
+#define BRAKE_CLAMP_MIN          BRAKE_RAW_MIN
+#define BRAKE_CLAMP_MAX          BRAKE_RAW_MAX
+#define INPUT_CLAMP_REPORT_MS    USB_STATUS_PERIOD_MS
+
 /* Allow the controller to command the full PWM range. */
 #define MOTOR_OUTPUTS_ENABLED     1
 #define MOTOR_MAX_DUTY_PERCENT  100
@@ -123,12 +150,12 @@
 #define MOTOR_MAX_RPM           200
 #define MOTOR_SHIFT_MAX_RPM       5
 
-/* Output duty is a whole percent. PID corrections retain tenths of a percent
- * internally so the initial, untuned gains keep their previous strength. */
-#define MOTOR_FF_MAX_PERCENT             40
-#define MOTOR_KP_TENTHS_PERCENT_PER_RPM   2
-#define MOTOR_KI_TENTHS_PERCENT_PER_RPM_S 1
-#define MOTOR_KD_TENTHS_PERCENT_S_PER_RPM 0
+/* Output duty is a whole percent; feedback retains thousandths internally. */
+/* Gain units: thousandths of effort-percent (150 means 0.15). */
+#define MOTOR_KP_MILLI_PERCENT_PER_RPM   450
+#define MOTOR_KI_MILLI_PERCENT_PER_RPM_S 600
+#define MOTOR_KD_MILLI_PERCENT_S_PER_RPM 20
+#define MOTOR_D_FILTER_MS               50
 
 /* Set each polarity after a brief, wheel-up test. */
 #define LEFT_FORWARD_IN1_HIGH    1

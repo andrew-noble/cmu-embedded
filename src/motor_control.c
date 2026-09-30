@@ -76,6 +76,49 @@ static int32_t throttle_percent(int16_t raw)
 	return CLAMP((moved * 100 + travel - 1) / travel, 0, 100);
 }
 
+struct wheel_pid {
+	int64_t integral_rpm_ms;
+	int32_t previous_measurement;
+	int64_t filtered_rate_rpm_s;
+	bool measurement_ready;
+};
+
+static int32_t wheel_pid_duty(struct wheel_pid *pid, int32_t target_rpm,
+			     int32_t measured_rpm, int32_t sample_ms, bool sampled)
+{
+	int32_t error = target_rpm - measured_rpm;
+	int64_t candidate = pid->integral_rpm_ms;
+	if (sampled) {
+		/* Derivative on measurement avoids a kick on target changes. Keep
+		 * the filtered derivative between samples, including command wakes. */
+		if (pid->measurement_ready) {
+			int64_t rate = ((int64_t)measured_rpm - pid->previous_measurement) *
+				1000 / sample_ms;
+			pid->filtered_rate_rpm_s +=
+				(rate - pid->filtered_rate_rpm_s) * sample_ms /
+				(MOTOR_D_FILTER_MS + sample_ms);
+		}
+		pid->previous_measurement = measured_rpm;
+		pid->measurement_ready = true;
+		candidate = CLAMP(candidate + (int64_t)error * sample_ms,
+			-MOTOR_INTEGRAL_LIMIT_RPM_MS, MOTOR_INTEGRAL_LIMIT_RPM_MS);
+	}
+	int64_t base = (int64_t)MOTOR_KP_MILLI_PERCENT_PER_RPM * error -
+		(int64_t)MOTOR_KD_MILLI_PERCENT_S_PER_RPM * pid->filtered_rate_rpm_s;
+	int64_t previous_effort = base +
+		MOTOR_KI_MILLI_PERCENT_PER_RPM_S * pid->integral_rpm_ms / 1000;
+	/* Permit the step that REACHES saturation. Freeze further accumulation
+	 * only once already saturated, so rounding cannot strand output at 99%.
+	 * Opposite-sign error can always unwind the integral. */
+	if ((previous_effort >= MOTOR_MAX_DUTY_PERCENT * 1000 && error > 0) ||
+	    (previous_effort <= 0 && error < 0)) {
+		candidate = pid->integral_rpm_ms;
+	}
+	pid->integral_rpm_ms = candidate;
+	int64_t effort = base + MOTOR_KI_MILLI_PERCENT_PER_RPM_S * candidate / 1000;
+	return clamp_duty(effort / 1000);
+}
+
 static bool pedal_pressed(int32_t raw, int32_t threshold, bool pressed_high)
 {
 	return pressed_high ? raw >= threshold : raw <= threshold;
@@ -91,6 +134,11 @@ BUILD_ASSERT(BRAKE_RAW_MIN <= BRAKE_PRESSED_AT &&
 BUILD_ASSERT(CLUTCH_RAW_MIN <= CLUTCH_PRESSED_AT &&
 	     CLUTCH_PRESSED_AT <= CLUTCH_RAW_MAX);
 BUILD_ASSERT(MOTOR_MAX_DUTY_PERCENT > 0 && MOTOR_MAX_DUTY_PERCENT <= 100);
+BUILD_ASSERT(MOTOR_MAX_RPM >= 2);
+BUILD_ASSERT(MOTOR_D_FILTER_MS >= 0);
+BUILD_ASSERT(MOTOR_KP_MILLI_PERCENT_PER_RPM >= 0 &&
+	     MOTOR_KI_MILLI_PERCENT_PER_RPM_S >= 0 &&
+	     MOTOR_KD_MILLI_PERCENT_S_PER_RPM >= 0);
 BUILD_ASSERT(MOTOR_DUTY_OFFSET_PERCENT >= 0 &&
 	     MOTOR_DUTY_OFFSET_PERCENT < MOTOR_MAX_DUTY_PERCENT);
 
@@ -112,8 +160,8 @@ static void motor_thread(void *p1, void *p2, void *p3)
 	struct motor_command command = { 0 };
 	uint32_t seen_generation = 0;
 	int64_t last_sample_ms = k_uptime_get();
-	int64_t integral_rpm_ms = 0;
-	int32_t previous_error = 0;
+	struct wheel_pid left_pid = {0}, right_pid = {0};
+	int32_t left_duty = 0, right_duty = 0;
 	int32_t left_rpm = 0, right_rpm = 0, target_rpm = 0, duty = 0;
 	bool reverse = false, clutch_was_pressed = false, motor_fault = false;
 	bool sensors_healthy = true;
@@ -173,8 +221,8 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			    rpm_magnitude(left_rpm) <= MOTOR_SHIFT_MAX_RPM &&
 			    rpm_magnitude(right_rpm) <= MOTOR_SHIFT_MAX_RPM) {
 				reverse = !reverse;
-				integral_rpm_ms = 0;
-				previous_error = 0;
+				left_pid = (struct wheel_pid){0};
+				right_pid = (struct wheel_pid){0};
 			}
 			clutch_was_pressed = clutch_pressed;
 		}
@@ -183,8 +231,9 @@ static void motor_thread(void *p1, void *p2, void *p3)
 		    !MOTOR_OUTPUTS_ENABLED) {
 			target_rpm = 0;
 			duty = 0;
-			integral_rpm_ms = 0;
-			previous_error = 0;
+			left_pid = (struct wheel_pid){0};
+			right_pid = (struct wheel_pid){0};
+			left_duty = right_duty = 0;
 			if (motor_driver_brake() != 0) {
 				motor_fault = true;
 			}
@@ -192,44 +241,24 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			/* Released accelerator: suspend PID and let the wheels coast. */
 			target_rpm = 0;
 			duty = 0;
-			integral_rpm_ms = 0;
-			previous_error = 0;
+			left_pid = (struct wheel_pid){0};
+			right_pid = (struct wheel_pid){0};
+			left_duty = right_duty = 0;
 			if (motor_driver_coast() != 0) {
 				motor_fault = true;
 				motor_driver_brake();
 			}
 		} else if (ticks > 0 || new_command) {
-			/* Both encoders contribute equally to the measured wheel speed. */
-			int32_t measured_rpm = (left_rpm + right_rpm) / 2;
-			int32_t directional_rpm = reverse ? -measured_rpm : measured_rpm;
-
+			/* Independent feedback: a moving wheel cannot hide a stopped one. */
 			target_rpm = throttle * MOTOR_MAX_RPM / 100;
-			int32_t error = target_rpm - directional_rpm;
+			left_duty = wheel_pid_duty(&left_pid, target_rpm,
+				reverse ? -left_rpm : left_rpm, sample_ms, ticks > 0);
+			right_duty = wheel_pid_duty(&right_pid, target_rpm,
+				reverse ? -right_rpm : right_rpm, sample_ms, ticks > 0);
+			duty = (left_duty + right_duty) / 2;
 
-			if (ticks > 0) {
-				integral_rpm_ms += (int64_t)error * sample_ms;
-				integral_rpm_ms = CLAMP(integral_rpm_ms,
-					-MOTOR_INTEGRAL_LIMIT_RPM_MS,
-					MOTOR_INTEGRAL_LIMIT_RPM_MS);
-			}
-
-			int64_t correction_tenths =
-				(int64_t)MOTOR_KP_TENTHS_PERCENT_PER_RPM * error +
-				(int64_t)MOTOR_KI_TENTHS_PERCENT_PER_RPM_S *
-				integral_rpm_ms / 1000;
-
-			if (ticks > 0) {
-				correction_tenths += (int64_t)MOTOR_KD_TENTHS_PERCENT_S_PER_RPM *
-					(error - previous_error) * 1000 / sample_ms;
-				previous_error = error;
-			}
-			int64_t duty_tenths =
-				(int64_t)MOTOR_FF_MAX_PERCENT * 10 * target_rpm /
-				MOTOR_MAX_RPM + correction_tenths;
-
-			duty = clamp_duty(duty_tenths / 10);
-			if (MOTOR_OUTPUTS_ENABLED && duty > 0) {
-				if (motor_driver_drive(reverse, duty) != 0) {
+			if (MOTOR_OUTPUTS_ENABLED && (left_duty > 0 || right_duty > 0)) {
+				if (motor_driver_drive_wheels(reverse, left_duty, right_duty) != 0) {
 					motor_fault = true;
 					motor_driver_brake();
 				}
@@ -248,6 +277,8 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			.right_rpm = right_rpm,
 			.target_rpm = target_rpm,
 			.duty_percent = duty,
+			.left_duty_percent = left_duty,
+			.right_duty_percent = right_duty,
 			.reverse = reverse,
 		};
 		k_spin_unlock(&motor_lock, key);

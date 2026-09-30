@@ -21,5 +21,6 @@ int motor_driver_brake(void);
 /* Disable both bridge enables so the wheels can coast. */
 int motor_driver_coast(void);
 int motor_driver_drive(bool reverse, int32_t duty_percent);
+int motor_driver_drive_wheels(bool reverse, int32_t left_duty, int32_t right_duty);
 
 #endif
