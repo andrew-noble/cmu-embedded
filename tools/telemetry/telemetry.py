@@ -17,6 +17,10 @@ import time
 
 import serial
 
+# Match the 20 ms STM32-to-Pi status packet period. This only controls PC
+# redraws; USB current snapshots still arrive at the firmware's print rate.
+DASHBOARD_REFRESH_MS = 20
+
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MOTOR = re.compile(r"ENC L\s+(-?\d+)\s+(-?\d+) rpm\s*\| R\s+(-?\d+)\s+(-?\d+) rpm"
                    r"\s*\| target\s+(-?\d+) duty\s+(\d+)% (FWD|REV)")
@@ -311,7 +315,8 @@ def main():
                 age = "no data" if last_received is None else f"last line {now-last_received:.1f}s ago"
                 title.set_text(f"STM32 telemetry — {count} lines — {age}")
 
-            animation = FuncAnimation(fig, update, interval=100, cache_frame_data=False)
+            animation = FuncAnimation(fig, update, interval=DASHBOARD_REFRESH_MS,
+                                      cache_frame_data=False)
             shutdown_timer.start()
             plt.show()
     except KeyboardInterrupt:

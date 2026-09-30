@@ -24,7 +24,7 @@
 #define LINK_FAILSAFE_RESPONSE_BUDGET_MS 100 /* measurement budget, not a delay */
 #define PRINT_EVERY             10  /* valid frames */
 #define MAIN_PRINT_PERIOD_MS    100
-#define USB_STATUS_PERIOD_MS    500 /* continuous summary, even with Pi link down */
+#define USB_STATUS_PERIOD_MS    100 /* continuous summary, even with Pi link down */
 
 /* Encoder and motor scheduling. */
 #define ENC_PERIOD_MS           10

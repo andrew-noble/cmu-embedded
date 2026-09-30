@@ -49,7 +49,7 @@ Use `--window 60` for a longer display or `--output /tmp/run.csv` for a chosen f
 Existing files are not overwritten. Host receive timestamps include serial and
 logging delays and cannot prove assignment response-time deadlines.
 
-New firmware must be flashed to see the 500 ms STATUS summaries and the 200 RPM
+New firmware must be flashed to see the 100 ms STATUS summaries and the 200 RPM
 target. Older firmware still displays available motor/command messages, with
 missing status clearly labeled. Firmware output states are software commands,
 not electrical feedback or measured servo position. Current uses nominal ACS712-05B
