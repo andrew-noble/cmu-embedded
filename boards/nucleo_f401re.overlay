@@ -142,7 +142,9 @@
 		io-channels = <&adc1 0>, <&adc1 1>, <&adc1 4>;
 		io-channel-names = "left_motor", "right_motor", "servo";
 		/* TODO: after confirming four unused wired pins, add all four: */
-		blinker-left-gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>;
-		blinker-right-gpios = <&gpioc 11 GPIO_ACTIVE_HIGH>;
+		blinker-left-front-gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>;
+		blinker-left-rear-gpios = <&gpioc 11 GPIO_ACTIVE_HIGH>;
+		blinker-right-front-gpios = <&gpioc 12 GPIO_ACTIVE_HIGH>;
+		blinker-right-rear-gpios = <&gpiod 2 GPIO_ACTIVE_HIGH>;
 	};
 };

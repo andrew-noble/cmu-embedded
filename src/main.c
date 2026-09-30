@@ -64,20 +64,77 @@ static void link_timer_expiry(struct k_timer *timer)
 
 K_TIMER_DEFINE(link_timer, link_timer_expiry, NULL);
 
-/* Fail-safe outputs: the motor thread brakes on an invalid command, hazards
- * flash, and the status frame reports the error. Returns true if the system
- * was in normal operation before this call. */
-static bool enter_error_state(void)
+/* Hazard-state outputs: the motor thread brakes on an invalid command,
+ * steering PWM stops, hazards flash, and the status frame reports the error. */
+static void apply_hazard_outputs(void)
 {
-	bool was_ok = atomic_clear(&link_ok) != 0;
-
 	motor_control_submit((struct motor_command){0});   /* valid = false: brake */
 	if (servo_driver_disable() != 0) {
 		printk("ERROR: could not disable steering PWM\n");
 	}
 	blinker_set_mode(BLINKER_HAZARD);
 	status_tx_set_zone_state(ZONE_STATE_ERROR);
+}
+
+/* Fail-safe: hazard outputs and link marked down. Returns true if the system
+ * was in normal operation before this call. */
+static bool enter_error_state(void)
+{
+	bool was_ok = atomic_clear(&link_ok) != 0;
+
+	apply_hazard_outputs();
 	return was_ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * Wheel buttons (Pi byte 10). Used only by cmd_handler.
+ * ------------------------------------------------------------------------- */
+static bool self_test;
+static int64_t self_test_press_ms;   /* last press while in self-test; -1 = none */
+static enum blinker_mode turn_mode = BLINKER_OFF;
+
+/* A press enters self-test. Once in, two presses within
+ * SELF_TEST_EXIT_WINDOW_MS exit; the entering press does not count. */
+static void update_self_test(bool pressed)
+{
+	if (!pressed) {
+		return;
+	}
+
+	int64_t now = k_uptime_get();
+
+	if (!self_test) {
+		self_test = true;
+		self_test_press_ms = -1;
+		apply_hazard_outputs();
+		printk("SELF-TEST: hazards on, dynamic braking\n");
+	} else if (self_test_press_ms >= 0 &&
+		   now - self_test_press_ms <= SELF_TEST_EXIT_WINDOW_MS) {
+		self_test = false;
+		printk("SELF-TEST exit\n");
+	} else {
+		self_test_press_ms = now;
+	}
+}
+
+/* A left or right press toggles that side's front and rear LEDs; pressing the
+ * other side switches over. Both pressed in the same frame is ignored. */
+static void update_turn(uint8_t pressed)
+{
+	enum blinker_mode side;
+
+	switch (pressed & (BUTTON_LEFT | BUTTON_RIGHT)) {
+	case BUTTON_LEFT:
+		side = BLINKER_LEFT;
+		break;
+	case BUTTON_RIGHT:
+		side = BLINKER_RIGHT;
+		break;
+	default:
+		return;
+	}
+	turn_mode = (turn_mode == side) ? BLINKER_OFF : side;
+	blinker_set_mode(turn_mode);
 }
 
 /* UART ISR callback: assemble 13-byte command frames and push each complete
@@ -151,6 +208,7 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 	int64_t last_print_ms = 0;
 	uint32_t n_valid = 0, n_bad = 0;
 	uint8_t buf[FRAME_LEN];
+	uint8_t held_buttons = 0;   /* buttons in the last in-range frame */
 	struct pi_command pi_cmd;
 
 	while (1) {
@@ -167,17 +225,32 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 			continue;
 		}
 
+		/* Button presses are 0 -> 1 changes between in-range frames. */
+		uint8_t pressed = 0;
+		bool exited_self_test = false;
+
+		if (r == FRAME_OK) {
+			bool was_self_test = self_test;
+
+			pressed = pi_cmd.buttons & ~held_buttons;
+			held_buttons = pi_cmd.buttons;
+			update_self_test((pressed & BUTTON_SELF_TEST) != 0);
+			exited_self_test = was_self_test && !self_test;
+		}
+
 		struct motor_command command = {
 			.throttle = pi_cmd.throttle,
 			.brake = pi_cmd.brake,
-			.clutch = 0, /* Pi bridge.c sends buttons placeholder, not clutch. */
+			.clutch = 0, /* byte 10 is buttons, not clutch */
 			.valid = true,
 		};
 
 		/* Out-of-range values mean error state (R3). Short-circuit: a
-		 * command that failed parse_frame is never submitted. */
-		if (r == FRAME_OUT_OF_RANGE || !motor_control_submit(command) ||
-		    servo_driver_set_steering(pi_cmd.steer) != 0) {
+		 * command that failed parse_frame is never submitted. In self-test
+		 * the hazard outputs stay applied, so drive and steering are skipped. */
+		if (r == FRAME_OUT_OF_RANGE ||
+		    (!self_test && (!motor_control_submit(command) ||
+				    servo_driver_set_steering(pi_cmd.steer) != 0))) {
 			n_bad++;
 			k_timer_stop(&link_timer);   /* already failed; no LINK LOST later */
 			if (enter_error_state()) {
@@ -190,11 +263,19 @@ static void cmd_handler_entry(void *p1, void *p2, void *p3) {
 		k_timer_start(&link_timer, K_MSEC(LINK_TIMEOUT_MS), K_NO_WAIT);
 		n_valid++;
 
-		if (!atomic_set(&link_ok, 1)) {
-			/* First valid command after power-up or an error. */
-			blinker_set_mode(BLINKER_OFF);
-			status_tx_set_zone_state(ZONE_STATE_NORMAL);
+		bool link_came_up = !atomic_set(&link_ok, 1);
+
+		if (link_came_up) {
 			printk("LINK UP\n");
+		}
+		if (!self_test) {
+			if (link_came_up || exited_self_test) {
+				/* Leaving the hazard state: start with no turn signal. */
+				turn_mode = BLINKER_OFF;
+				blinker_set_mode(BLINKER_OFF);
+				status_tx_set_zone_state(ZONE_STATE_NORMAL);
+			}
+			update_turn(pressed);
 		}
 
 		if (n_valid % PRINT_EVERY == 0) {

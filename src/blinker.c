@@ -7,18 +7,14 @@
 
 #define BLINKER_NODE DT_PATH(zephyr_user)
 
-#define HAS_LEFT_FRONT  DT_NODE_HAS_PROP(BLINKER_NODE, blinker_left_front_gpios)
-#define HAS_LEFT_REAR   DT_NODE_HAS_PROP(BLINKER_NODE, blinker_left_rear_gpios)
-#define HAS_RIGHT_FRONT DT_NODE_HAS_PROP(BLINKER_NODE, blinker_right_front_gpios)
-#define HAS_RIGHT_REAR  DT_NODE_HAS_PROP(BLINKER_NODE, blinker_right_rear_gpios)
-#define BLINKER_PINS_CONFIGURED \
-	(HAS_LEFT_FRONT && HAS_LEFT_REAR && HAS_RIGHT_FRONT && HAS_RIGHT_REAR)
+/* Fail the build, rather than run without LEDs, if a property is missing or
+ * misspelled in the board overlay. */
+BUILD_ASSERT(DT_NODE_HAS_PROP(BLINKER_NODE, blinker_left_front_gpios) &&
+	     DT_NODE_HAS_PROP(BLINKER_NODE, blinker_left_rear_gpios) &&
+	     DT_NODE_HAS_PROP(BLINKER_NODE, blinker_right_front_gpios) &&
+	     DT_NODE_HAS_PROP(BLINKER_NODE, blinker_right_rear_gpios),
+	     "Define all four blinker-*-gpios properties in the board overlay");
 
-BUILD_ASSERT((HAS_LEFT_FRONT + HAS_LEFT_REAR + HAS_RIGHT_FRONT + HAS_RIGHT_REAR) == 0 ||
-	     BLINKER_PINS_CONFIGURED,
-	     "Define all four blinker GPIOs together in the board overlay");
-
-#if BLINKER_PINS_CONFIGURED
 static const struct gpio_dt_spec left_front =
 	GPIO_DT_SPEC_GET(BLINKER_NODE, blinker_left_front_gpios);
 static const struct gpio_dt_spec left_rear =
@@ -27,7 +23,6 @@ static const struct gpio_dt_spec right_front =
 	GPIO_DT_SPEC_GET(BLINKER_NODE, blinker_right_front_gpios);
 static const struct gpio_dt_spec right_rear =
 	GPIO_DT_SPEC_GET(BLINKER_NODE, blinker_right_rear_gpios);
-#endif
 
 static struct k_spinlock state_lock;
 static enum blinker_mode requested_mode;
@@ -73,7 +68,6 @@ void blinker_set_mode(enum blinker_mode mode)
 
 static int configure_pins(void)
 {
-#if BLINKER_PINS_CONFIGURED
 	const struct gpio_dt_spec *pins[] = {
 		&left_front, &left_rear, &right_front, &right_rear
 	};
@@ -84,15 +78,11 @@ static int configure_pins(void)
 			return -ENODEV;
 		}
 	}
-#else
-	printk("Blinker GPIOs not assigned; timer state runs without LED outputs\n");
-#endif
 	return 0;
 }
 
 static int write_pins(enum blinker_mode mode, bool on)
 {
-#if BLINKER_PINS_CONFIGURED
 	bool left = on && (mode == BLINKER_LEFT || mode == BLINKER_HAZARD);
 	bool right = on && (mode == BLINKER_RIGHT || mode == BLINKER_HAZARD);
 	int rc = gpio_pin_set_dt(&left_front, left);
@@ -101,11 +91,6 @@ static int write_pins(enum blinker_mode mode, bool on)
 	rc |= gpio_pin_set_dt(&right_front, right);
 	rc |= gpio_pin_set_dt(&right_rear, right);
 	return rc;
-#else
-	ARG_UNUSED(mode);
-	ARG_UNUSED(on);
-	return 0;
-#endif
 }
 
 static void blinker_thread(void *p1, void *p2, void *p3)

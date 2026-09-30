@@ -27,6 +27,16 @@
 #define ENC_PERIOD_MS           10
 #define MOTOR_INTEGRAL_LIMIT_RPM_MS 500000LL
 
+/* Pi byte 10 button bits from the steering wheel, 1 while held. Byte 10 has
+ * only 8 bits, so the Pi packs wheel button indices 10/5/4 into bits 0/1/2.
+ * A press is a 0 -> 1 change between valid frames.
+ * Self-test: one press enters hazards + dynamic braking; two presses within
+ * SELF_TEST_EXIT_WINDOW_MS (after entering) exit. Left/right toggle turns. */
+#define BUTTON_SELF_TEST        (1U << 0)   /* wheel button index 10 */
+#define BUTTON_LEFT             (1U << 1)   /* wheel button index 5 */
+#define BUTTON_RIGHT            (1U << 2)   /* wheel button index 4 */
+#define SELF_TEST_EXIT_WINDOW_MS 500
+
 /* Blinker timing and thread. Half-periods give 1 Hz turns and 2 Hz hazards. */
 #define TURN_HALF_PERIOD_MS     500
 #define HAZARD_HALF_PERIOD_MS   250
@@ -65,7 +75,7 @@
 /* Pi pedal fields are 16-bit little-endian values. Throttle uses 0..32767;
  * measured brake endpoints are 30454 released and 32767 fully pressed.
  * Negative readings are rejected.
- * Byte 10 is a buttons placeholder (currently zero), not clutch yet.
+ * Byte 10 carries the wheel buttons (BUTTON_* above), not clutch.
  */
 #define STEER_RAW_MIN         -32767
 #define STEER_RAW_MAX          32766
