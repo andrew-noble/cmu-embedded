@@ -1,0 +1,150 @@
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/*
+ * Nucleo-F401RE overlay
+ *
+ * USART1 (Pi link) receives on PB7 only. PB6 (D10) drives right motor IN3.
+ * USART1 TX can only be PB6 or PA9 on the F401, and PA9 is the right
+ * encoder, so the status frame has no TX pin until one of them is freed.
+ * Current sensors on ADC1: A0 = PA0 (left motor), A1 = PA1 (right motor),
+ * A2 = PA4 (servo).
+ * Encoders use two timers in quadrature-decoder mode:
+ *   Left  encoder: TIM3, CH1 = PB4 (D5), CH2 = PC7 (D9)
+ *   Right encoder: TIM1, CH1 = PA8 (D7), CH2 = PA9 (D8)
+ */
+
+/* Keep the Pi link's RX line idle-high when the cable is unplugged. */
+&usart1 {
+	pinctrl-0 = <&usart1_rx_pb7 &usart1_tx_pb6>;
+};
+
+&usart1_rx_pb7 {
+	bias-pull-up;
+};
+
+&usart1_tx_pb6 {
+	bias-pull-up;
+};
+
+
+/* Pull-ups on the encoder inputs, in case the encoder outputs are open-drain. */
+&tim3_ch1_pb4 {
+	bias-pull-up;
+};
+
+&tim3_ch2_pc7 {
+	bias-pull-up;
+};
+
+&tim1_ch1_pa8 {
+	bias-pull-up;
+};
+
+&tim1_ch2_pa9 {
+	bias-pull-up;
+};
+
+
+
+
+
+&timers3 {
+	status = "okay";
+
+	qdec_left: qdec {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch1_pb4 &tim3_ch2_pc7>;
+		pinctrl-names = "default";
+		st,encoder-mode = <0x3>;           /* x4: count every edge of A and B */
+		st,input-filter-level = <10>;      /* reject glitches shorter than ~1 us */
+		st,counts-per-revolution = <1316>; /* measured wheel average 1316.2, rounded */
+	};
+};
+
+&timers1 {
+	status = "okay";
+
+	qdec_right: qdec {
+		status = "okay";
+		pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+		pinctrl-names = "default";
+		st,encoder-mode = <0x3>;
+		st,input-filter-level = <10>;
+		st,counts-per-revolution = <1316>; /* same measured average as left */
+	};
+};
+
+/* Current sensors. Channel numbers match ADC1_IN0, IN1 and IN4. */
+&adc1 {
+	pinctrl-0 = <&adc1_in0_pa0 &adc1_in1_pa1 &adc1_in4_pa4>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 84)>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 84)>;
+		zephyr,resolution = <12>;
+	};
+
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 84)>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/* L298N enables: D3 = TIM2 CH2, D6 = TIM2 CH3. */
+/* D15/PB8 is reserved for steering, not the board's default I2C1 clock. */
+&i2c1 {
+	status = "disabled";
+};
+
+&timers4 {
+	status = "okay";
+	st,prescaler = <83>; /* 84 MHz / 84 = 1 MHz; 20 ms fits 16 bits */
+	servo_pwm: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim4_ch3_pb8>;
+		pinctrl-names = "default";
+	};
+};
+
+&pwm2 {
+	pinctrl-0 = <&tim2_ch2_pb3 &tim2_ch3_pb10>;
+	pinctrl-names = "default";
+};
+
+/* L298N inputs: left D2/D4, right D11/D12. */
+/ {
+	zephyr,user {
+		pwms = <&pwm2 2 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+		       <&pwm2 3 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+		       <&servo_pwm 3 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+		pwm-names = "left_motor", "right_motor", "steering";
+		left-in1-gpios = <&gpioa 10 GPIO_ACTIVE_HIGH>;
+		left-in2-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
+		right-in1-gpios = <&gpioa 6 GPIO_ACTIVE_HIGH>;
+		right-in2-gpios = <&gpioa 7 GPIO_ACTIVE_HIGH>;
+		/* Current sensors, in the order status_tx.c reports them. */
+		io-channels = <&adc1 0>, <&adc1 1>, <&adc1 4>;
+		io-channel-names = "left_motor", "right_motor", "servo";
+		/* TODO: after confirming four unused wired pins, add all four: */
+		blinker-left-front-gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>;
+		blinker-left-rear-gpios = <&gpioc 11 GPIO_ACTIVE_HIGH>;
+		blinker-right-front-gpios = <&gpioc 12 GPIO_ACTIVE_HIGH>;
+		blinker-right-rear-gpios = <&gpiod 2 GPIO_ACTIVE_HIGH>;
+	};
+};
