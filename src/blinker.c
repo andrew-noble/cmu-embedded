@@ -24,7 +24,7 @@ static const struct gpio_dt_spec right_front =
 static const struct gpio_dt_spec right_rear =
 	GPIO_DT_SPEC_GET(BLINKER_NODE, blinker_right_rear_gpios);
 
-static struct k_spinlock state_lock;
+static K_MUTEX_DEFINE(state_lock);
 static enum blinker_mode requested_mode;
 static uint32_t generation;
 static bool phase_on;
@@ -32,9 +32,9 @@ static bool turn_seen;
 
 enum blinker_mode blinker_get_mode(void)
 {
-	k_spinlock_key_t key = k_spin_lock(&state_lock);
+	k_mutex_lock(&state_lock, K_FOREVER);
 	enum blinker_mode mode = requested_mode;
-	k_spin_unlock(&state_lock, key);
+	k_mutex_unlock(&state_lock);
 	return mode;
 }
 
@@ -76,18 +76,18 @@ void blinker_set_mode(enum blinker_mode mode)
 	if (mode < BLINKER_OFF || mode > BLINKER_HAZARD) {
 		return;
 	}
-	k_spinlock_key_t key = k_spin_lock(&state_lock);
+	k_mutex_lock(&state_lock, K_FOREVER);
 	set_mode_locked(mode);
-	k_spin_unlock(&state_lock, key);
+	k_mutex_unlock(&state_lock);
 }
 
 void blinker_update_turn(uint8_t pressed, int16_t steering)
 {
-	k_spinlock_key_t key = k_spin_lock(&state_lock);
+	k_mutex_lock(&state_lock, K_FOREVER);
 
 	/* Hazards belong to self-test/fail-safe, never to steering cancellation. */
 	if (requested_mode == BLINKER_HAZARD) {
-		k_spin_unlock(&state_lock, key);
+		k_mutex_unlock(&state_lock);
 		return;
 	}
 	switch (pressed & (BUTTON_LEFT | BUTTON_RIGHT)) {
@@ -116,7 +116,7 @@ void blinker_update_turn(uint8_t pressed, int16_t steering)
 			set_mode_locked(BLINKER_OFF);
 		}
 	}
-	k_spin_unlock(&state_lock, key);
+	k_mutex_unlock(&state_lock);
 }
 
 static int configure_pins(void)
@@ -162,7 +162,7 @@ static void blinker_thread(void *p1, void *p2, void *p3)
 	while (1) {
 		k_sem_take(&blinker_wake, K_FOREVER);
 		uint32_t ticks = k_timer_status_get(&blinker_timer);
-		k_spinlock_key_t key = k_spin_lock(&state_lock);
+		k_mutex_lock(&state_lock, K_FOREVER);
 		enum blinker_mode mode = requested_mode;
 
 		if (seen_generation != generation) {
@@ -171,7 +171,7 @@ static void blinker_thread(void *p1, void *p2, void *p3)
 			phase_on = !phase_on;
 		}
 		bool on = phase_on;
-		k_spin_unlock(&state_lock, key);
+		k_mutex_unlock(&state_lock);
 
 		if (write_pins(mode, on) != 0) {
 			printk("Blinker GPIO write failed\n");

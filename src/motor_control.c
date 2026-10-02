@@ -5,7 +5,7 @@
 #include "motor_control.h"
 #include "motor_driver.h"
 
-static struct k_spinlock motor_lock;
+static K_MUTEX_DEFINE(motor_lock);
 static struct motor_command latest_command;
 static struct motor_telemetry latest_telemetry;
 static uint32_t command_generation;
@@ -25,11 +25,11 @@ bool motor_control_submit(struct motor_command command)
 		command = (struct motor_command) { 0 };
 	}
 
-	k_spinlock_key_t key = k_spin_lock(&motor_lock);
+	k_mutex_lock(&motor_lock, K_FOREVER);
 
 	latest_command = command;
 	command_generation++;
-	k_spin_unlock(&motor_lock, key);
+	k_mutex_unlock(&motor_lock);
 	k_sem_give(&motor_wake);
 	return accepted;
 }
@@ -37,10 +37,10 @@ bool motor_control_submit(struct motor_command command)
 
 void motor_control_get_telemetry(struct motor_telemetry *telemetry)
 {
-	k_spinlock_key_t key = k_spin_lock(&motor_lock);
+	k_mutex_lock(&motor_lock, K_FOREVER);
 
 	*telemetry = latest_telemetry;
-	k_spin_unlock(&motor_lock, key);
+	k_mutex_unlock(&motor_lock);
 }
 
 static int32_t clamp_duty(int64_t duty)
@@ -183,12 +183,12 @@ static void motor_thread(void *p1, void *p2, void *p3)
 	while (1) {
 		k_sem_take(&motor_wake, K_FOREVER);
 
-		k_spinlock_key_t key = k_spin_lock(&motor_lock);
+		k_mutex_lock(&motor_lock, K_FOREVER);
 		bool new_command = seen_generation != command_generation;
 
 		command = latest_command;
 		seen_generation = command_generation;
-		k_spin_unlock(&motor_lock, key);
+		k_mutex_unlock(&motor_lock);
 
 		uint32_t ticks = k_timer_status_get(&control_timer);
 		int32_t sample_ms = ENC_PERIOD_MS;
@@ -269,7 +269,7 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			}
 		}
 
-		key = k_spin_lock(&motor_lock);
+		k_mutex_lock(&motor_lock, K_FOREVER);
 		latest_telemetry = (struct motor_telemetry) {
 			.left_position = sample.left_position,
 			.right_position = sample.right_position,
@@ -281,7 +281,7 @@ static void motor_thread(void *p1, void *p2, void *p3)
 			.right_duty_percent = right_duty,
 			.reverse = reverse,
 		};
-		k_spin_unlock(&motor_lock, key);
+		k_mutex_unlock(&motor_lock);
 	}
 }
 
